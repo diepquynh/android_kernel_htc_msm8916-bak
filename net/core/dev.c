@@ -4774,8 +4774,8 @@ static int dev_cpu_callback(struct notifier_block *nfb,
 	}
 	while (!list_empty(&oldsd->poll_list)) {
 		struct napi_struct *napi = list_first_entry(&oldsd->poll_list,
-							    struct napi_struct,
-							    poll_list);
+							struct napi_struct,
+							poll_list);
 
 		list_del_init(&napi->poll_list);
 		if (napi->poll == process_backlog)
@@ -4783,6 +4783,8 @@ static int dev_cpu_callback(struct notifier_block *nfb,
 		else
 			____napi_schedule(sd, napi);
 	}
+
+	oldsd->backlog.state = 0;
 
 	raise_softirq_irqoff(NET_TX_SOFTIRQ);
 	local_irq_enable();

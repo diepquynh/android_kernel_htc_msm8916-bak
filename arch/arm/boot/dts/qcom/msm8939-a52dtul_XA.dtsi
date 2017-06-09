@@ -182,14 +182,17 @@
 			qcom,iterm-ma = <50>;
 			htc,batt-full-criteria = <350>;
 			htc,batt-eoc-criteria = <50>;
+			qcom,max-fastchg-ma = <1500>;
+			qcom,clamp-soc-voltage-mv = <3400>;
 			qcom,otg-batt-curr-limit = <1500>;
 
 			qcom,thermal-mitigation = <1500 700 600 0>;
 			qcom,warm-bat-mv = <4100>;
 			qcom,warm-bat-decidegc = <48>;
 			qcom,cool-bat-decidegc = <0>;
-			qcom,clamp-soc-voltage-mv = <3400>;
-			qcom,max-fastchg-ma = <1500>;
+			htc,wa-to-re-calc-soc-in-low-temp;
+
+			htc,r-hw-mb-impedance = <350>;
 		};
         };
 
@@ -328,7 +331,6 @@
 		pinctrl-1 = <&cdc_pdm_lines_sus>;
 		pinctrl-2 = <&cross_conn_det_act>;
 		pinctrl-3 = <&cross_conn_det_sus>;
-		qcom,cdc-us-euro-gpios = <&msm_gpio 120 0>;
 		asoc-platform = <&pcm0>, <&pcm1>, <&voip>, <&voice>,
 				<&loopback>, <&compress>, <&hostless>,
 				<&afe>, <&lsm>, <&routing>, <&lpa>;

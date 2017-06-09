@@ -159,55 +159,6 @@
 			};
 		};
 
-		/* TODO:
-		 * This is the node added for csir2289 which has difference
-		 * default programming with the correct one. Please add it
-		 * together with the original smb1360 device tree node in your file.
-		 * I copied from another project with might has different
-		 * configurations with your project, please notice you can
-		 * change any of the following settings to follow your project, except:
-		 * 1) the phandle name: smb1360_otg_supply_14, this has to be match
-		 *         with the one new added in usb_otg driver;
-		 * 2) compatible string: this has to be match with the C code change;
-		 * 3) reg: the I2C client address which csir2289 used, you can change it to
-		 *         your own if it's not;
-		 * 4) It should be used with 10mohm configuration.
-		 */
-		smb1360_otg_supply_14: smb1360-chg-fg@14 {
-			compatible = "qcom,smb1360-chg-fg-csir2289";
-			reg = <0x14>;
-			interrupt-parent = <&msm_gpio>;
-			interrupts = <62 8>;
-			pinctrl-names = "default";
-			pinctrl-0 = <&smb_int_default>;
-			regulator-name = "smb1360_otg_vreg";
-
-			/* battery-profile select properties */
-			qcom,batt-profile-select;
-			qcom,smb1360-vadc = <&pm8916_vadc>;
-
-			qcom,chg-inhibit-disabled;
-			qcom,otg-fet-present;
-			qcom,otg-fet-enable-gpio = <&pm8916_gpios 3 0>;
-			qcom,charging-timeout = <768>;
-			qcom,recharge-thresh-mv = <200>;
-			qcom,fg-cutoff-voltage-mv = <3500>;
-			qcom,fg-voltage-empty-mv = <3000>;
-			htc,fg-voltage-empty-re-check-mv = <3200>;
-			qcom,fg-auto-recharge-soc = <97>;
-			qcom,iterm-ma = <50>;
-			htc,batt-full-criteria = <350>;
-			htc,batt-eoc-criteria = <50>;
-			qcom,otg-batt-curr-limit = <1500>;
-
-			qcom,thermal-mitigation = <1500 700 600 0>;
-			qcom,warm-bat-mv = <4100>;
-			qcom,warm-bat-decidegc = <48>;
-			qcom,cool-bat-decidegc = <0>;
-			qcom,clamp-soc-voltage-mv = <3400>;
-			qcom,max-fastchg-ma = <1500>;
-		};
-
 		smb1360_otg_supply: smb1360-chg-fg@70 {
 			compatible = "qcom,smb1360-chg-fg";
 			reg = <0x70>;
@@ -233,14 +184,17 @@
 			qcom,iterm-ma = <50>;
 			htc,batt-full-criteria = <350>;
 			htc,batt-eoc-criteria = <50>;
+			qcom,max-fastchg-ma = <1500>;
+			qcom,clamp-soc-voltage-mv = <3400>;
 			qcom,otg-batt-curr-limit = <1500>;
 
 			qcom,thermal-mitigation = <1500 700 600 0>;
 			qcom,warm-bat-mv = <4100>;
 			qcom,warm-bat-decidegc = <48>;
 			qcom,cool-bat-decidegc = <0>;
-			qcom,clamp-soc-voltage-mv = <3400>;
-			qcom,max-fastchg-ma = <1500>;
+			htc,wa-to-re-calc-soc-in-low-temp;
+
+			htc,r-hw-mb-impedance = <350>;
 		};
         };
 
@@ -379,7 +333,6 @@
 		pinctrl-1 = <&cdc_pdm_lines_sus>;
 		pinctrl-2 = <&cross_conn_det_act>;
 		pinctrl-3 = <&cross_conn_det_sus>;
-		qcom,cdc-us-euro-gpios = <&msm_gpio 120 0>;
 		asoc-platform = <&pcm0>, <&pcm1>, <&voip>, <&voice>,
 				<&loopback>, <&compress>, <&hostless>,
 				<&afe>, <&lsm>, <&routing>, <&lpa>;
@@ -750,11 +703,6 @@
 	pinctrl-name = "default";
 	pinctrl-0 = <&usbid_default>;
 	vbus_otg-supply = <&smb1360_otg_supply>;
-	/* TODO
-	 * This need to add for compatible, and little C code
-	 * change in usb_otg is also needed
-	 */
-	vbus_otg_sec-supply = <&smb1360_otg_supply_14>;
 };
 
 &android_usb {

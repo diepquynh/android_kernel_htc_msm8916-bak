@@ -258,7 +258,7 @@ static ssize_t sw_timeout_store(
 	struct ncp6951_flt_data *flt = dev_get_drvdata(dev);
 	input = simple_strtoul(buf, NULL, 10);
 
-	if(input >= 0 && input <= 2000){
+	if(input <= 2000){
 		flt->flash_timeout_sw = input;
 		FLT_DBG_LOG("%s: %4u\n", __func__, flt->flash_timeout_sw);
 	}else
@@ -429,6 +429,7 @@ int ncp6951_flt_flash(struct ncp6951_flt_data *flt, uint32_t mA)
 		en = 0;
 	} else if(mA > 0 && mA < 100) {
 		lv = 0;
+		en = 0x05;
 	} else if (mA >= 100 && mA <= 550) {
 		lv = mA - 100;
 		lv = lv * 15 / 433;

@@ -58,3 +58,10 @@ config HTC_FEATURES_RIL_PCN0008_ENLARGE_RADIO_BUFFER
 	default n
 	---help---
 	  enlarge radio log buffer.
+
+config HTC_FEATURES_RIL_PCN0009_HTC_EXTEND_SHOUTDOWN_TIMEOUT
+        tristate "HTC_FEATURES_RIL_PCN0009_HTC_EXTEND_SHOUTDOWN_TIMEOUT"
+        default y
+        depends on MSM_BAM_DMUX
+        ---help---
+          Get temperatire from battery.

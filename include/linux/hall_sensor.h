@@ -1,5 +1,12 @@
+/*for Hall sensor common header file*/
 #ifndef __LINUX_HALL_SENSOR_H
 #define __LINUX_HALL_SENSOR_H
+
+#define HALL_POLE_BIT  1
+#define HALL_POLE_N	  0
+#define HALL_POLE_S	  1
+#define HALL_FAR 	  0
+#define HALL_NEAR	  1
 
 extern struct blocking_notifier_head hallsensor_notifier_list;
 

@@ -298,7 +298,7 @@
 #define SMB1360_AICL_CHECK_PERIOD_MS	1000
 
 #define VBUS_DROP_SCALE_UPPER	150
-#define VBUS_DROP_SCALE_LOWER	67
+#define VBUS_DROP_SCALE_LOWER	50
 #endif 
 
 enum {
@@ -344,17 +344,6 @@ static int otg_curr_ma[] = {350, 550, 950, 1500};
 struct smb1360_otg_regulator {
 	struct regulator_desc	rdesc;
 	struct regulator_dev	*rdev;
-};
-
-struct smb1360_profile_data {
-	int vfloat_mv;
-};
-
-struct smb1360_csir_correction {
-	bool	irq_pulse;
-	struct smb1360_profile_data	profile_a;
-	struct smb1360_profile_data	profile_b;
-	bool	csir2289;
 };
 
 struct smb1360_chip {
@@ -412,6 +401,12 @@ struct smb1360_chip {
 	int				otg_fet_enable_gpio;
 
 	
+	int				voltage_now;
+	int				current_now;
+	int				resistance_now;
+	int				temp_now;
+	int				soc_now;
+	int				fcc_mah;
 	bool				usb_present;
 	bool				batt_present;
 	bool				batt_hot;
@@ -429,7 +424,6 @@ struct smb1360_chip {
 	int				charging_disabled_status;
 	u32				connected_rid;
 	u32				profile_rid[BATTERY_PROFILE_MAX];
-	u8				profile_in_use;
 
 	u32				peek_poke_address;
 	u32				fg_access_type;
@@ -446,7 +440,6 @@ struct smb1360_chip {
 	struct mutex			charging_disable_lock;
 	struct mutex			current_change_lock;
 	struct mutex			read_write_lock;
-	struct smb1360_csir_correction	*csir_correction;
 
 	int				batt_id;
 	struct delayed_work		update_ovp_uvp_work;
@@ -463,7 +456,12 @@ struct smb1360_chip {
 	bool				pm8916_enabled;
 	int				combined_chgr_max_aicl_input_curr_limit;
 	int				pm8916_max_input_curr_limit;
-	int				soc_raw;
+	bool				wa_to_re_calc_soc_in_low_temp;
+
+	struct delayed_work		vin_collapse_check_work;
+	struct wake_lock		vin_collapse_check_wake_lock;
+
+	struct delayed_work		cable_impedance_work;
 };
 
 static int chg_time[] = {
@@ -480,28 +478,6 @@ static int input_current_limit[] = {
 
 static int fastchg_current[] = {
 	450, 600, 750, 900, 1050, 1200, 1350, 1500,
-};
-
-static struct smb1360_csir_correction csir2289 = {
-	.irq_pulse = false,
-	.profile_a = {
-		.vfloat_mv = 4400,
-	},
-	.profile_b = {
-		.vfloat_mv = 4350,
-	},
-	.csir2289 = true,
-};
-
-static struct of_device_id smb1360_match_table[] = {
-	{
-		.compatible		= "qcom,smb1360-chg-fg",
-		.data			= NULL,
-	},
-	{
-		.compatible		= "qcom,smb1360-chg-fg-csir2289",
-		.data			= (void *)&csir2289,
-	},
 };
 
 #ifdef CONFIG_HTC_BATT_8960
@@ -532,6 +508,14 @@ static bool flag_enable_bms_charger_log;
 static int ovp = false;
 static int uvp = false;
 
+static bool gs_measure_cable_impedance = true;
+static bool gs_stop_eoc = false;
+static int gs_R_cable_impedance = 0;
+static int gs_cable_impedance = 0;     
+static int gs_aicl_result = 0;
+static int gs_R_HW_MB_Impedance = 0;
+
+static int smb1360_input_current_limit_set(struct smb1360_chip *chip, int mA);
 int smb1360_chg_aicl_enable(struct smb1360_chip *chip, bool enable);
 
 static int smb1360_read_bytes(struct smb1360_chip *chip, int reg, u8 *val, u8 bytes);
@@ -542,7 +526,9 @@ static int smb1360_get_prop_batt_temp(struct smb1360_chip *chip);
 static int smb1360_get_prop_voltage_now(struct smb1360_chip *chip);
 static int smb1360_get_prop_current_now(struct smb1360_chip *chip);
 static int smb1360_get_prop_charge_type(struct smb1360_chip *chip);
+static int smb1360_get_prop_batt_health(struct smb1360_chip *chip);
 static int smb1360_get_input_current_limit(struct smb1360_chip *chip);
+static int smb1360_get_input_current_limit_status(struct smb1360_chip *chip);
 static int smb1360_set_appropriate_usb_current(struct smb1360_chip *chip);
 static int smb1360_chg_is_usb_chg_plugged_in(struct smb1360_chip *chip);
 static int get_prop_usb_valid_status(struct smb1360_chip *chip,
@@ -551,6 +537,7 @@ static int smb1360_read(struct smb1360_chip *chip, int reg, u8 *val);
 static int smb1360_get_usbin(struct smb1360_chip *chip);
 static void dump_all(void);
 
+static int smb1360_ext_charging_disable(struct smb1360_chip *chip, int disable);
 #ifdef CONFIG_QPNP_LINEAR_CHARGER_SMB1360
 extern int pm8916_charger_enable(bool enable, int chg_current);
 #else
@@ -642,10 +629,17 @@ static void handle_usb_present_change(struct smb1360_chip *chip,
 			if (chip->pm8916_enabled) {
 				
 				rc = smb1360_chg_aicl_enable(the_chip, 1);
-				if (rc < 0) {
+				if (rc < 0)
 					pr_err("enable/disable AICL failed rc=%d\n", rc);
-				}
 			}
+
+			
+			mutex_lock(&chip->charging_disable_lock);
+			chip->charging_disabled_status &= ~USER;
+			mutex_unlock(&chip->charging_disable_lock);
+			if (delayed_work_pending(&the_chip->kick_wd_work))
+				cancel_delayed_work_sync(&the_chip->kick_wd_work);
+
 		} else {
 			htc_start_eoc_work(chip);
 			
@@ -904,6 +898,23 @@ int smb1360_set_pwrsrc_and_charger_enable(enum htc_power_source_type src,
 	pr_info("src=%d, pre_pwr_src=%d, chg_enable=%d, pwrsrc_enable=%d\n",
 				src, pre_pwr_src, chg_enable, pwrsrc_enable);
 
+	if (src == 2 && gs_R_HW_MB_Impedance != -EINVAL) {
+		if (gs_measure_cable_impedance == true) {
+			gs_measure_cable_impedance = false;
+			gs_stop_eoc = true;
+			schedule_delayed_work(&the_chip->cable_impedance_work,
+				msecs_to_jiffies(10000));
+		}
+	} else {
+		gs_measure_cable_impedance = true;
+		gs_cable_impedance = 0;
+		gs_R_cable_impedance = 0;
+		gs_aicl_result = 0;
+		gs_stop_eoc = false;
+		if (delayed_work_pending(&the_chip->cable_impedance_work))
+			cancel_delayed_work_sync(&the_chip->cable_impedance_work);
+	}
+
 	if (flag_enable_fast_charge)
 		src = htc_fake_charger_for_testing(src);
 
@@ -948,6 +959,10 @@ int smb1360_set_pwrsrc_and_charger_enable(enum htc_power_source_type src,
 	else
 		handle_usb_present_change(the_chip, 1);
 
+	
+	if (src != HTC_PWR_SOURCE_TYPE_BATT && !chg_enable)
+		smb1360_charger_enable(0);
+
 	return 0;
 }
 int smb1360_charger_enable(bool enable)
@@ -971,6 +986,10 @@ int smb1360_charger_enable(bool enable)
 	
 	if (!enable)
 		schedule_delayed_work(&the_chip->kick_wd_work, 0);
+	else {
+		if (delayed_work_pending(&the_chip->kick_wd_work))
+			cancel_delayed_work_sync(&the_chip->kick_wd_work);
+	}
 	
 
 	g_chg_error = 1;
@@ -978,6 +997,18 @@ int smb1360_charger_enable(bool enable)
 	if (rc < 0)
 		pr_err("Unable to disable charging rc=%d\n", rc);
 	g_chg_error = 0;
+
+	if (enable) {
+		mutex_lock(&the_chip->current_change_lock);
+		
+		rc = smb1360_set_appropriate_usb_current(the_chip);
+		if (rc)
+			pr_err("Couldn't set USB current rc = %d\n", rc);
+		mutex_unlock(&the_chip->current_change_lock);
+
+		htc_start_eoc_work(the_chip);
+	}
+
 
 	return rc;
 }
@@ -1081,7 +1112,25 @@ int smb1360_is_batt_full_eoc_stop(int *result)
 }
 int smb1360_charger_get_attr_text(char *buf, int size)
 {
-	return -ENXIO;
+	int len = 0;
+	int aicl_result_now;
+
+	aicl_result_now = smb1360_get_input_current_limit_status(the_chip);
+
+	
+	len += scnprintf(buf + len, size -len,
+			"gs_R_HW_MB_Impedance: %d\n"
+			"gs_cable_impedance: %d\n"
+			"gs_R_cable_impedance: %d\n"
+			"gs_aicl_result: %d\n"
+			"gs_aicl_result_now: %d\n",
+			gs_R_HW_MB_Impedance,
+			gs_cable_impedance,
+			gs_R_cable_impedance,
+			gs_aicl_result,
+			aicl_result_now);
+
+	return len;
 }
 int smb1360_fake_usbin_valid_irq_handler(void)
 {
@@ -1206,8 +1255,10 @@ smb1360_eoc_work(struct work_struct *work)
 				struct smb1360_chip, eoc_work);
 	int ibat_ma, vbat_mv, soc = 0;
 	u8 chg_state = 0;
-	bool is_csir2289_batt_full = false;
 	int rc = 0;
+
+	if (gs_stop_eoc == true)
+		goto end;
 
 	wake_lock(&chip->eoc_worker_lock);
 	if (!smb1360_chg_is_usb_chg_plugged_in(chip)){
@@ -1222,17 +1273,12 @@ smb1360_eoc_work(struct work_struct *work)
 		ibat_ma = smb1360_get_prop_current_now(chip)/1000;
 		vbat_mv = smb1360_get_prop_voltage_now(chip);
 
-		if (chip->csir_correction != NULL && chip->csir_correction->csir2289 == true)
-			is_csir2289_batt_full = chip->soc_raw == 100 ? true : false;
-
 		pr_info("ibat_ma=%d, vbat_mv=%d, batt_full_cri=%d, eoc_ma=%d, "
 				"eoc_count=%d, eoc_count_by_curr=%d, dischg_count=%d, "
-				"chg_state=0x%X, fastchg=%d, chgtaper=%d, "
-				"is_csir2289_batt_full=%d\n",
+				"chg_state=0x%X, fastchg=%d, chgtaper=%d\n",
 				ibat_ma, vbat_mv, chip->batt_full_criteria, chip->iterm_ma,
 				eoc_count, eoc_count_by_curr, dischg_count,
-				chg_state, smb1360_is_fastchg_on(chip), smb1360_chg_is_taper(chip),
-				is_csir2289_batt_full);
+				chg_state, smb1360_is_fastchg_on(chip), smb1360_chg_is_taper(chip));
 
 		if (!smb1360_chg_is_taper(chip)) {
 			
@@ -1242,7 +1288,7 @@ smb1360_eoc_work(struct work_struct *work)
 			dischg_count++;
 			if (dischg_count >= CONSECUTIVE_COUNT)
 				eoc_count_by_curr = eoc_count = 0;
-		} else if ((ibat_ma * -1) > chip->batt_full_criteria && !is_csir2289_batt_full) {
+		} else if ((ibat_ma * -1) > chip->batt_full_criteria) {
 			
 			eoc_count_by_curr = eoc_count = dischg_count = 0;
 		} else if ((ibat_ma * -1) > chip->batt_eoc_criteria) {
@@ -1330,6 +1376,7 @@ smb1360_eoc_work(struct work_struct *work)
 			goto stop_eoc;
 	}
 
+end:
 	schedule_delayed_work(&chip->eoc_work,
 		msecs_to_jiffies(SMB1360_EOC_CHECK_PERIOD_MS));
 	return;
@@ -1344,10 +1391,24 @@ stop_eoc:
 
 #define VUSBIN_SAMPLE_COUNTS	5
 static int usbin[VUSBIN_SAMPLE_COUNTS];
-int usbin_sample_counts;
+static int usbin_sample_counts;
 static int vbus_uv[8];
 static int vbus_diff[7];
 static bool vbus_drop_sharply;
+static bool is_vin_collapse;
+static bool is_aicl_ongoing;
+
+static void smb1360_clean_aicl_flag(struct smb1360_chip *chip)
+{
+	if (chip->pm8916_enabled) {
+		is_vin_collapse = FALSE;
+		vbus_drop_sharply = FALSE;
+		is_aicl_ongoing = FALSE;
+		usbin_sample_counts = 0;
+		memset(usbin, 0, sizeof(usbin));
+	}
+}
+
 static void
 smb1360_aicl_work(struct work_struct *work)
 {
@@ -1357,25 +1418,57 @@ smb1360_aicl_work(struct work_struct *work)
 	static u8 aiclval[2];
 	int ibat_ma, vbat_mv, usbin_uv;
 	bool disable_pm8916_chg = FALSE;
+	bool is_charging_resumed = FALSE;
 	int cnt = 0, vbus_drop_scale;
 	int max_aicl_input_curr_limit;
-	int pm8916_max_input_curr_limit;
+	int is_temp_fault_dis_chg;
 	int rc = 0;
 	int i = 0, j = 0;
+
+	if (gs_stop_eoc == true) {
+		schedule_delayed_work(&chip->aicl_work, msecs_to_jiffies(SMB1360_AICL_CHECK_PERIOD_MS));
+		pr_info("waiting due to cable impedance worker is running\n");
+		return;
+	}
 
 	max_aicl_input_curr_limit = (chip->combined_chgr_max_aicl_input_curr_limit == -EINVAL) ?
 			COMBINED_CHGR_MAX_AICL_INPUT_CURR_LIMIT : chip->combined_chgr_max_aicl_input_curr_limit;
 
-	pm8916_max_input_curr_limit = (chip->pm8916_max_input_curr_limit == -EINVAL) ?
-			PM8916_MAX_INPUT_CURR_LIMIT : chip->pm8916_max_input_curr_limit;
-
 	vbat_mv = smb1360_get_prop_voltage_now(chip);
+
+	
+	if (is_aicl_ongoing == FALSE
+			&& chip->pm8916_psy_ma == chip->pm8916_max_input_curr_limit) {
+		is_charging_resumed = TRUE;
+		goto pm8916_aicl_finished;
+	}
+
+	if (is_batt_full_eoc_stop) {
+		pr_info("charging is in EOC mode\n");
+		disable_pm8916_chg = TRUE;
+		goto disable_pm8916_chg;
+	}
 
 	
 	if (vbat_mv >= 4200 && smb1360_chg_is_taper(chip)) {
 		pr_info("charging is in CC mode, vbat=%dmV\n", vbat_mv);
 		disable_pm8916_chg = TRUE;
-		vbus_drop_sharply = FALSE;
+		goto disable_pm8916_chg;
+	}
+
+	
+	if (is_vin_collapse) {
+		pr_info("is_vin_collapse was triggered");
+		is_vin_collapse = FALSE;
+		disable_pm8916_chg = TRUE;
+		goto disable_pm8916_chg;
+	}
+
+	
+	smb1360_is_batt_temp_fault_disable_chg(&is_temp_fault_dis_chg);
+	if (is_temp_fault_dis_chg) {
+		pr_info("temperature is fault and disable to charge\n");
+		disable_pm8916_chg = TRUE;
 		goto disable_pm8916_chg;
 	}
 
@@ -1386,7 +1479,7 @@ smb1360_aicl_work(struct work_struct *work)
 	ibat_ma = smb1360_get_prop_current_now(chip)/1000;
 	usbin_uv = smb1360_get_usbin(chip);
 	usbin_sample_counts++;
-	pr_info("usbin_mv = %d, usbin_sample_counts=%d\n", usbin_uv / 1000, usbin_sample_counts);
+	pr_info("usbin_mv=%d, ibat_ma=%d, usbin_sample_counts=%d\n", usbin_uv / 1000, ibat_ma, usbin_sample_counts);
 
 	pr_info("usbin[%d, %d, %d, %d, %d]\n",
 					usbin[0], usbin[1], usbin[2], usbin[3], usbin[4]);
@@ -1421,7 +1514,7 @@ smb1360_aicl_work(struct work_struct *work)
 	pr_info("aicl_ma=%d, vbat_mv=%d, ibat_ma=%d, usbin_mv=%d, [48h, 49h]=[0x%02X, 0x%02X], pm8916_ma=%d,"
 		" max_aicl_input_curr_limit=%d, pm8916_max_input_curr_limit=%d\n",
 			chip->usb_psy_ma, vbat_mv, ibat_ma, usbin_uv / 1000, aiclval[0], aiclval[1], chip->pm8916_psy_ma,
-			max_aicl_input_curr_limit, pm8916_max_input_curr_limit);
+			max_aicl_input_curr_limit, chip->pm8916_max_input_curr_limit);
 
 	
 	
@@ -1432,6 +1525,7 @@ smb1360_aicl_work(struct work_struct *work)
 	case HTC_PWR_SOURCE_TYPE_MHL_AC:
 		switch (chip->pm8916_psy_ma) {
 		case 0:
+			is_aicl_ongoing = TRUE;
 		case 100:
 		case 200:
 		case 300:
@@ -1449,18 +1543,19 @@ smb1360_aicl_work(struct work_struct *work)
 				vbus_uv[0], vbus_uv[1], vbus_uv[2], vbus_uv[3], vbus_uv[4], vbus_uv[5], vbus_uv[6], vbus_uv[7]);
 			pr_info("vbus_diff[%d, %d, %d, %d, %d, %d, %d]\n",
 				vbus_diff[0], vbus_diff[1], vbus_diff[2], vbus_diff[3], vbus_diff[4], vbus_diff[5], vbus_diff[6]);
-			if ((cnt - 1) > 0) {
-				vbus_drop_scale = vbus_diff[cnt - 1] * 100 / vbus_diff[0];
-			pr_info("vbus_drop_scale = %d\n", vbus_drop_scale);
 
-				if (vbus_drop_scale < VBUS_DROP_SCALE_LOWER || vbus_drop_scale > VBUS_DROP_SCALE_UPPER ) {
-					if (vbus_drop_sharply == FALSE)
-						vbus_drop_sharply = TRUE;
-					else {
-						disable_pm8916_chg = TRUE;
-						goto disable_pm8916_chg;
-					}
+			if ((cnt - 2) > 0) {
+				vbus_drop_scale = vbus_diff[cnt - 1] * 100 / vbus_diff[1];
+				pr_info("vbus_drop_scale = %d\n", vbus_drop_scale);
+
+				if ((vbus_drop_sharply == TRUE && vbus_drop_scale < VBUS_DROP_SCALE_LOWER)
+						|| vbus_drop_scale > VBUS_DROP_SCALE_UPPER) {
+					disable_pm8916_chg = TRUE;
+					goto disable_pm8916_chg;
 				}
+
+				if (vbus_drop_sharply == FALSE && vbus_drop_scale < VBUS_DROP_SCALE_LOWER)
+					vbus_drop_sharply = TRUE;
 			}
 			break;
 		default:
@@ -1470,9 +1565,8 @@ smb1360_aicl_work(struct work_struct *work)
 
 		
 		rc = smb1360_chg_aicl_enable(chip, 0);
-		if (rc < 0) {
+		if (rc < 0)
 			pr_err("enable/disable AICL failed rc=%d\n", rc);
-		}
 
 		if (chip->usb_psy_ma + chip->pm8916_psy_ma != max_aicl_input_curr_limit) {
 			chip->pm8916_psy_ma += 100;
@@ -1493,22 +1587,34 @@ disable_pm8916_chg:
 		pr_info("disable_pm8916_chg\n");
 		chip->pm8916_psy_ma = 0;
 		pm8916_charger_enable(0, chip->pm8916_psy_ma);
-		memset(vbus_uv, 0, sizeof(vbus_uv));
-		memset(vbus_diff, 0, sizeof(vbus_diff));
 
 		
 		rc = smb1360_chg_aicl_enable(chip, 1);
-		if (rc < 0) {
+		if (rc < 0)
 			pr_err("enable/disable AICL failed rc=%d\n", rc);
-		}
 	}
 
-	vbus_drop_sharply = FALSE;
+pm8916_aicl_finished:
+	smb1360_clean_aicl_flag(chip);
+	memset(vbus_uv, 0, sizeof(vbus_uv));
+	memset(vbus_diff, 0, sizeof(vbus_diff));
 	pr_info("finish\n");
 
 	
 	if (chip->usb_psy_ma + chip->pm8916_psy_ma == max_aicl_input_curr_limit) {
-		chip->pm8916_psy_ma = pm8916_max_input_curr_limit;
+		chip->pm8916_psy_ma = chip->pm8916_max_input_curr_limit;
+		rc = pm8916_charger_enable(1, chip->pm8916_psy_ma);
+		if (rc)
+			pr_err("Couldn't set pm8916 current rc = %d\n", rc);
+	}
+
+	if (is_charging_resumed) {
+		pr_info("charging is resumed!\n");
+		
+		rc = smb1360_chg_aicl_enable(chip, 0);
+		if (rc < 0)
+			pr_err("enable/disable AICL failed rc=%d\n", rc);
+
 		rc = pm8916_charger_enable(1, chip->pm8916_psy_ma);
 		if (rc)
 			pr_err("Couldn't set pm8916 current rc = %d\n", rc);
@@ -1578,6 +1684,9 @@ int smb1360_limit_charge_enable(bool enable)
 		chg_limit_current = 0;
 
 	qpnp_chg_set_appropriate_battery_current(the_chip);
+
+	smb1360_ext_charging_disable(the_chip, enable);
+
 	return 0;
 }
 
@@ -1644,6 +1753,9 @@ int smb1360_limit_input_current(bool enable, int reason)
 		limit_intput_current = the_chip->usb_psy_ma;
 
 		
+		smb1360_ext_charging_disable(the_chip, true);
+
+		
 		rc = smb1360_chg_aicl_enable(the_chip, 0);
 		if (rc < 0) {
 			pr_err("enable/disable AICL failed rc=%d\n", rc);
@@ -1673,8 +1785,194 @@ int smb1360_limit_input_current(bool enable, int reason)
 			pr_err("enable/disable AICL failed rc=%d\n", rc);
 			return rc;
 		}
+
+		
+		smb1360_ext_charging_disable(the_chip, false);
 	}
 	return 0;
+}
+
+#define AICL_CHECK_RAMP_MS 	(1000)
+static void vin_collapse_check_worker(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct smb1360_chip *chip = container_of(dwork,
+			struct smb1360_chip, vin_collapse_check_work);
+	int rc = 0;
+
+	if (is_ac_online()) {
+		is_vin_collapse = TRUE;
+		mutex_lock(&chip->current_change_lock);
+		
+		rc = smb1360_set_appropriate_usb_current(chip);
+		if (rc)
+			pr_err("Couldn't set USB current rc = %d\n", rc);
+		mutex_unlock(&chip->current_change_lock);
+	} else {
+		
+		cable_detection_vbus_irq_handler();
+	}
+}
+
+int smb1360_is_bad_cable_used(int *result)
+{
+	*result = 0;
+
+	if(!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+
+	if (gs_cable_impedance == 3)
+		*result = 1;
+
+	return 0;
+}
+
+#define SOC_LEVEL_AT_4200MV	85
+static void
+cable_impedance_worker(struct work_struct *work)
+{
+	static int vusbin_mv_1, vusbin_mv_2, vusbin_mv_3, aicl_result;
+	int vusbin1, vusbin2, vusbin3;
+	int iusb1, iusb2, iusb3;
+	int rRes1, rRes2;
+	int icl_cfg_ma;
+	int rc = 0;
+
+	if (!the_chip) {
+		pr_err("[Cable impedance]called before the_chip initialized\n");
+		gs_stop_eoc = false;
+		return;
+	}
+
+	if (gs_R_HW_MB_Impedance == -EINVAL) {
+		pr_info("[Cable impedance]gs_R_HW_MB_Impedance missing, ignore detection.");
+		goto endWorker;
+	}
+
+	if (the_chip->soc_now >= SOC_LEVEL_AT_4200MV) {
+		pr_info("[Cable impedance] battery capacity(%d%%) is higher, ignore detection.",
+			the_chip->soc_now);
+		goto endWorker;
+	}
+
+	pr_info("[Cable impedance]Start to calculate cable impedance!\n");
+	gs_cable_impedance = 4;
+
+	icl_cfg_ma = smb1360_get_input_current_limit(the_chip);
+
+	aicl_result = smb1360_get_input_current_limit_status(the_chip);
+	gs_aicl_result = aicl_result;
+
+	if (((!smb1360_is_fastchg_on(the_chip)) || (pwr_src != HTC_PWR_SOURCE_TYPE_AC)) ||
+			((smb1360_get_prop_batt_health(the_chip) != POWER_SUPPLY_HEALTH_GOOD) || (aicl_result > 700))) {
+		pr_info("[Cable impedance]Ignore detection. aicl=%dmA, chg_type=%d, batt_temp=%d\n",
+			aicl_result, smb1360_get_prop_charge_type(the_chip), smb1360_get_prop_batt_temp(the_chip));
+		gs_cable_impedance = 1;
+		goto endWorker;
+	}
+
+	smb1360_chg_aicl_enable(the_chip, false);
+
+	
+
+	
+	{
+		rc = smb1360_input_current_limit_set(the_chip, 500);
+		if (rc < 0) {
+			pr_err("Couldn't set cable impedance 500mA ICL vote rc=%d\n", rc);
+			goto turn_on_hw_aicl_rerun;
+		}
+	}
+	msleep(3000);
+	if (pwr_src != HTC_PWR_SOURCE_TYPE_AC) {
+		pr_info("[Cable impedance]Not correct charger source, ignore detection.!\n");
+		gs_cable_impedance = 1;
+		goto turn_on_hw_aicl_rerun;
+	}
+	vusbin1 = smb1360_get_usbin(the_chip)/1000;
+	vusbin2 = smb1360_get_usbin(the_chip)/1000;
+	vusbin3 = smb1360_get_usbin(the_chip)/1000;
+	vusbin_mv_1 = (vusbin1 + vusbin2 + vusbin3)/3;
+	iusb1 = 500;
+	pr_info("[Cable impedance] Iusb=500mA(%d), Vusb1-1=%d,Vusb1-2=%d,Vusb1-3=%d,Vusb1=%d\n",
+			iusb1, vusbin1, vusbin2, vusbin3, vusbin_mv_1);
+
+	
+	{
+		rc = smb1360_input_current_limit_set(the_chip, 400);
+		if (rc < 0) {
+			pr_err("Couldn't set cable impedance 400mA ICL vote rc=%d\n", rc);
+			goto turn_on_hw_aicl_rerun;
+		}
+	}
+	msleep(3000);
+	if (pwr_src != HTC_PWR_SOURCE_TYPE_AC) {
+		pr_info("[Cable impedance]Not correct charger source, ignore detection.!\n");
+		gs_cable_impedance = 1;
+		goto turn_on_hw_aicl_rerun;
+	}
+	vusbin1 = smb1360_get_usbin(the_chip)/1000;
+	vusbin2 = smb1360_get_usbin(the_chip)/1000;
+	vusbin3 = smb1360_get_usbin(the_chip)/1000;
+	vusbin_mv_2 = (vusbin1 + vusbin2 + vusbin3)/3;
+	iusb2 = 400;
+	pr_info("[Cable impedance] Iusb=400mA(%d), Vusb2-1=%d,Vusb2-2=%d,Vusb2-3=%d,Vusb2=%d\n",
+			iusb2, vusbin1, vusbin2, vusbin3, vusbin_mv_2);
+
+	
+	{
+		rc = smb1360_input_current_limit_set(the_chip, 300);
+		if (rc < 0) {
+			pr_err("Couldn't set cable impedance 300mA ICL vote rc=%d\n", rc);
+			goto turn_on_hw_aicl_rerun;
+		}
+	}
+	msleep(3000);
+	if (pwr_src != HTC_PWR_SOURCE_TYPE_AC) {
+		pr_info("[Cable impedance]Not correct charger source, ignore detection.!\n");
+		gs_cable_impedance = 1;
+		goto turn_on_hw_aicl_rerun;
+	}
+	vusbin1 = smb1360_get_usbin(the_chip)/1000;
+	vusbin2 = smb1360_get_usbin(the_chip)/1000;
+	vusbin3 = smb1360_get_usbin(the_chip)/1000;
+	vusbin_mv_3 = (vusbin1 + vusbin2 + vusbin3)/3;
+	iusb3 = 300;
+	pr_info("[Cable impedance] Iusb=300mA(%d), Vusb3-1=%d,Vusb3-2=%d,Vusb3-3=%d,Vusb3=%d\n",
+			iusb3, vusbin1, vusbin2, vusbin3, vusbin_mv_3);
+
+	rRes1 = ((vusbin_mv_3 - vusbin_mv_1) * 1000 / (iusb1 - iusb3)) - gs_R_HW_MB_Impedance;
+	rRes2 = ((vusbin_mv_3 - vusbin_mv_2) * 1000 / (iusb2 - iusb3)) - gs_R_HW_MB_Impedance;
+
+	pr_info("[Cable impedance] R1=%d, R2=%d, Vusb1=%d, Vusb2=%d, Vusb3=%d, AICL=%d\n",
+			rRes1, rRes2, vusbin_mv_1, vusbin_mv_2, vusbin_mv_3, aicl_result);
+
+	gs_R_cable_impedance = (rRes1 + rRes2)/2;
+
+	pr_info("[Cable impedance] R=%d\n", gs_R_cable_impedance);
+
+	if (gs_R_cable_impedance >= 1000) {
+		gs_cable_impedance = 3;
+		htc_charger_event_notify(HTC_CHARGER_EVENT_BAD_CABLE);
+	} else
+		gs_cable_impedance = 2;
+
+	gs_measure_cable_impedance = false;
+
+turn_on_hw_aicl_rerun:
+	rc = smb1360_input_current_limit_set(the_chip, icl_cfg_ma);
+	if (rc < 0)
+		pr_err("Couldn't recover %dmA ICL before run cable impedance rc=%d\n", icl_cfg_ma, rc);
+
+	smb1360_chg_aicl_enable(the_chip, true);
+
+endWorker:
+	gs_stop_eoc = false;
+	pr_info("[Cable impedance]End.\n");
+
+	smb1360_ext_charging_disable(the_chip, false);
 }
 #endif 
 
@@ -1978,6 +2276,11 @@ static int smb1360_enable_fg_access(struct smb1360_chip *chip)
 	return 0;
 }
 
+static inline bool is_device_suspended(struct smb1360_chip *chip)
+{
+	return !chip->resume_completed;
+}
+
 static int smb1360_disable_fg_access(struct smb1360_chip *chip)
 {
 	int rc;
@@ -2124,7 +2427,6 @@ static int smb1360_charging_disable(struct smb1360_chip *chip, int reason,
 								int disable)
 {
 	int rc = 0;
-	int rc_pm8916 = 0;
 	int disabled;
 
 	mutex_lock(&chip->charging_disable_lock);
@@ -2139,22 +2441,6 @@ static int smb1360_charging_disable(struct smb1360_chip *chip, int reason,
 	else
 		disabled &= ~reason;
 
-	if (chip->pm8916_enabled && disabled) {
-		if (delayed_work_pending(&chip->aicl_work)) {
-			cancel_delayed_work_sync(&chip->aicl_work);
-			vbus_drop_sharply = FALSE;
-		}
-
-		chip->pm8916_psy_ma = 0;
-		rc_pm8916 = pm8916_charger_enable(0, chip->pm8916_psy_ma);
-		usbin_sample_counts = 0;
-		memset(usbin, 0, sizeof(usbin));
-
-		if (rc_pm8916)
-			pr_err("Couldn't disable pm8916 charging for reason=%d rc=%d\n",
-							reason, rc);
-	}
-
 	if (disabled)
 		rc = __smb1360_charging_disable(chip, true);
 	else
@@ -2168,11 +2454,51 @@ static int smb1360_charging_disable(struct smb1360_chip *chip, int reason,
 
 	mutex_unlock(&chip->charging_disable_lock);
 
-	if (rc)
-		return rc;
-	else
-		return rc_pm8916;
+	return rc;
 }
+
+static int smb1360_ext_charging_disable(struct smb1360_chip *chip, int disable)
+{
+	int rc = 0;
+
+	if (!chip->pm8916_enabled)
+		return rc;
+
+	if (disable || chg_limit_current != 0 || iusb_limit_enable) {
+		pr_info("disable=%d, chg_limit_current=%d, iusb_limit_enable=%d\n",
+					disable, chg_limit_current, iusb_limit_enable);
+
+		
+		if (delayed_work_pending(&chip->aicl_work))
+			cancel_delayed_work_sync(&chip->aicl_work);
+
+		if (is_aicl_ongoing)
+			chip->pm8916_psy_ma = 0; 
+		else
+			pr_info("pm8916_psy_ma=%d\n", chip->pm8916_psy_ma);
+
+		smb1360_clean_aicl_flag(chip);
+
+		rc = pm8916_charger_enable(0, chip->pm8916_psy_ma);
+
+		if (rc)
+			pr_err("Couldn't disable pm8916 charging rc=%d\n", rc);
+
+		
+		rc = smb1360_chg_aicl_enable(chip, 1);
+		if (rc < 0)
+			pr_err("enable/disable AICL failed rc=%d\n", rc);
+	} else {
+		
+		if (is_ac_online())
+			schedule_delayed_work(&chip->aicl_work, msecs_to_jiffies(SMB1360_AICL_START_PM8916_DELAY_MS));
+		else
+			pr_info("do not enable pm8916 charging due to cable type = %d\n", pwr_src);
+	}
+
+	return rc;
+}
+
 
 #ifndef CONFIG_HTC_BATT_8960
 static enum power_supply_property smb1360_battery_properties[] = {
@@ -2200,6 +2526,9 @@ static int smb1360_get_prop_batt_status(struct smb1360_chip *chip)
 {
 	int rc;
 	u8 reg = 0, chg_type;
+
+	if (is_device_suspended(chip))
+		return POWER_SUPPLY_STATUS_UNKNOWN;
 
 	if (chip->batt_full)
 		return POWER_SUPPLY_STATUS_FULL;
@@ -2244,6 +2573,9 @@ static int smb1360_get_prop_charge_type(struct smb1360_chip *chip)
 	int rc;
 	u8 reg = 0;
 	u8 chg_type;
+
+	if (is_device_suspended(chip))
+		return POWER_SUPPLY_CHARGE_TYPE_UNKNOWN;
 
 	rc = smb1360_read(chip, STATUS_3_REG, &reg);
 	if (rc) {
@@ -2290,6 +2622,9 @@ static int smb1360_get_prop_batt_capacity(struct smb1360_chip *chip)
 	if (chip->fake_battery_soc >= 0)
 		return chip->fake_battery_soc;
 
+	if (is_device_suspended(chip))
+		return chip->soc_now;
+
 	rc = smb1360_read(chip, SHDW_FG_MSYS_SOC, &reg);
 	if (rc) {
 		pr_err("Failed to read FG_MSYS_SOC rc=%d\n", rc);
@@ -2306,16 +2641,17 @@ static int smb1360_get_prop_batt_capacity(struct smb1360_chip *chip)
 		soc = 0;
 	}
 
-	chip->soc_raw = soc;
-
 	pr_debug("msys_soc_reg=0x%02x, fg_soc=%d batt_full = %d\n", reg,
 						soc, chip->batt_full);
 
-	soc = smb1360_re_calculate_soc_in_low_temperature(chip, soc);
+	if (chip->wa_to_re_calc_soc_in_low_temp)
+		soc = smb1360_re_calculate_soc_in_low_temperature(chip, soc);
 
 	soc = smb1360_clamp_soc_based_on_voltage(chip, soc);
 
-	return chip->batt_full ? 100 : bound(soc, 0, 100);
+	chip->soc_now = (chip->batt_full ? 100 : bound(soc, 0, 100));
+
+	return chip->soc_now;
 }
 
 #ifndef CONFIG_HTC_BATT_8960
@@ -2323,6 +2659,9 @@ static int smb1360_get_prop_chg_full_design(struct smb1360_chip *chip)
 {
 	u8 reg[2];
 	int rc, fcc_mah = 0;
+
+	if (is_device_suspended(chip))
+		return chip->fcc_mah;
 
 	rc = smb1360_read_bytes(chip, SHDW_FG_CAPACITY, reg, 2);
 	if (rc) {
@@ -2334,7 +2673,9 @@ static int smb1360_get_prop_chg_full_design(struct smb1360_chip *chip)
 	pr_debug("reg[0]=0x%02x reg[1]=0x%02x fcc_mah=%d\n",
 				reg[0], reg[1], fcc_mah);
 
-	return fcc_mah * 1000;
+	chip->fcc_mah = fcc_mah * 1000;
+
+	return chip->fcc_mah;
 }
 #endif 
 
@@ -2342,6 +2683,9 @@ static int smb1360_get_prop_batt_temp(struct smb1360_chip *chip)
 {
 	u8 reg[2];
 	int rc, temp = 0;
+
+	if (is_device_suspended(chip))
+		return chip->temp_now;
 
 	rc = smb1360_read_bytes(chip, SHDW_FG_BATT_TEMP, reg, 2);
 	if (rc) {
@@ -2356,13 +2700,18 @@ static int smb1360_get_prop_batt_temp(struct smb1360_chip *chip)
 	pr_debug("reg[0]=0x%02x reg[1]=0x%02x temperature=%d\n",
 					reg[0], reg[1], temp);
 
-	return temp;
+	chip->temp_now = temp;
+
+	return chip->temp_now;
 }
 
 static int smb1360_get_prop_voltage_now(struct smb1360_chip *chip)
 {
 	u8 reg[2];
 	int rc, temp = 0;
+
+	if (is_device_suspended(chip))
+		return chip->voltage_now;
 
 	rc = smb1360_read_bytes(chip, SHDW_FG_VTG_NOW, reg, 2);
 	if (rc) {
@@ -2376,7 +2725,9 @@ static int smb1360_get_prop_voltage_now(struct smb1360_chip *chip)
 	pr_debug("reg[0]=0x%02x reg[1]=0x%02x voltage=%d\n",
 				reg[0], reg[1], temp);
 
-	return temp;
+	chip->voltage_now = temp;
+
+	return chip->voltage_now;
 }
 
 #ifndef CONFIG_HTC_BATT_8960
@@ -2386,6 +2737,9 @@ static int smb1360_get_prop_batt_resistance(struct smb1360_chip *chip)
 	u16 temp;
 	int rc;
 	int64_t resistance;
+
+	if (is_device_suspended(chip))
+		return chip->resistance_now;
 
 	rc = smb1360_read_bytes(chip, SHDW_FG_ESR_ACTUAL, reg, 2);
 	if (rc) {
@@ -2399,7 +2753,9 @@ static int smb1360_get_prop_batt_resistance(struct smb1360_chip *chip)
 	pr_debug("reg=0x%02x resistance=%lld\n", temp, resistance);
 
 	
-	return resistance;
+	chip->resistance_now = resistance;
+
+	return chip->resistance_now;
 }
 #endif 
 
@@ -2407,6 +2763,9 @@ static int smb1360_get_prop_current_now(struct smb1360_chip *chip)
 {
 	u8 reg[2];
 	int rc, temp = 0;
+
+	if (is_device_suspended(chip))
+		return chip->current_now;
 
 	rc = smb1360_read_bytes(chip, SHDW_FG_CURR_NOW, reg, 2);
 	if (rc) {
@@ -2420,7 +2779,9 @@ static int smb1360_get_prop_current_now(struct smb1360_chip *chip)
 	pr_debug("reg[0]=0x%02x reg[1]=0x%02x current=%d\n",
 				reg[0], reg[1], temp * 1000);
 
-	return temp * 1000;
+	chip->current_now = temp * 1000;
+
+	return chip->current_now;
 }
 
 #ifndef CONFIG_HTC_BATT_8960
@@ -2481,6 +2842,7 @@ static int smb1360_set_appropriate_usb_current(struct smb1360_chip *chip)
 #else
 		pr_debug("current_ma=%d <= 2 disable charging\n", current_ma);
 
+		smb1360_ext_charging_disable(chip, true);
 		rc = smb1360_charging_disable(chip, CURRENT, true);
 		if (rc < 0)
 			pr_err("Unable to disable charging rc=%d\n", rc);
@@ -2563,18 +2925,11 @@ static int smb1360_set_appropriate_usb_current(struct smb1360_chip *chip)
 		if (chip->pm8916_enabled) {
 			
 			rc = smb1360_chg_aicl_enable(the_chip, 1);
-			if (rc < 0) {
+			if (rc < 0)
 				pr_err("enable/disable AICL failed rc=%d\n", rc);
-			}
 		}
 
 		qpnp_chg_set_appropriate_battery_current(chip);
-
-		if (chip->pm8916_enabled) {
-			
-			vbus_drop_sharply = FALSE;
-			schedule_delayed_work(&chip->aicl_work, msecs_to_jiffies(SMB1360_AICL_START_PM8916_DELAY_MS));
-		}
 #endif 
 	}
 
@@ -2774,18 +3129,14 @@ static void smb1360_external_power_changed(struct power_supply *psy)
 static int hot_hard_handler(struct smb1360_chip *chip, u8 rt_stat)
 {
 	int batt_temp;
-	int rc;
 
 	batt_temp = smb1360_get_prop_batt_temp(chip);
 	pr_info("batt_temp=%d degreeC, rt_stat = 0x%02x\n", batt_temp, rt_stat);
 	chip->batt_hot = !!rt_stat;
 
-	if (chip->pm8916_enabled && chip->pm8916_psy_ma != 0) {
+	if (!(flag_keep_charge_on || flag_pa_recharge))
 		
-		rc = pm8916_charger_enable(!chip->batt_hot, chip->pm8916_psy_ma);
-		if (rc)
-			pr_err("Couldn't disable pm8916 charging, rc=%d\n", rc);
-	}
+		smb1360_ext_charging_disable(chip, chip->batt_hot);
 
 	htc_gauge_event_notify(HTC_GAUGE_EVENT_TEMP_ZONE_CHANGE);
 	return 0;
@@ -2794,18 +3145,14 @@ static int hot_hard_handler(struct smb1360_chip *chip, u8 rt_stat)
 static int cold_hard_handler(struct smb1360_chip *chip, u8 rt_stat)
 {
 	int batt_temp;
-	int rc;
 
 	batt_temp = smb1360_get_prop_batt_temp(chip);
 	pr_info("batt_temp=%d degreeC, rt_stat = 0x%02x\n", batt_temp, rt_stat);
 	chip->batt_cold = !!rt_stat;
 
-	if (chip->pm8916_enabled && chip->pm8916_psy_ma != 0) {
+	if (!(flag_keep_charge_on || flag_pa_recharge))
 		
-		rc = pm8916_charger_enable(!chip->batt_cold, chip->pm8916_psy_ma);
-		if (rc)
-			pr_err("Couldn't disable pm8916 charging, rc=%d\n", rc);
-	}
+		smb1360_ext_charging_disable(chip, chip->batt_cold);
 
 	htc_gauge_event_notify(HTC_GAUGE_EVENT_TEMP_ZONE_CHANGE);
 	return 0;
@@ -2960,11 +3307,34 @@ static int chg_inhibit_handler(struct smb1360_chip *chip, u8 rt_stat)
 	return 0;
 }
 
+#define VIN_MIN_COLLAPSE_CHECK_MS	350
 static int power_ok_handler(struct smb1360_chip *chip, u8 rt_stat)
 {
 	pr_info("chip->usb_present = %d usb_present = %d\n",
 			chip->usb_present, !!rt_stat);
-	cable_detection_vbus_irq_handler();
+
+	if (rt_stat == 0) {
+		if (delayed_work_pending(&the_chip->cable_impedance_work))
+			cancel_delayed_work_sync(&the_chip->cable_impedance_work);
+	}
+
+	if (chip->pm8916_enabled &&
+			chip->usb_present &&
+			rt_stat == 0 &&
+			(pwr_src == HTC_PWR_SOURCE_TYPE_AC ||
+				pwr_src == HTC_PWR_SOURCE_TYPE_9VAC ||
+				pwr_src == HTC_PWR_SOURCE_TYPE_MHL_AC)) {
+		if (delayed_work_pending(&chip->aicl_work))
+			cancel_delayed_work_sync(&chip->aicl_work);
+
+		smb1360_ext_charging_disable(chip, true);
+
+		schedule_delayed_work(&chip->vin_collapse_check_work,
+			msecs_to_jiffies(VIN_MIN_COLLAPSE_CHECK_MS));
+		wake_lock_timeout(&chip->vin_collapse_check_wake_lock, HZ/2);
+	} else {
+		cable_detection_vbus_irq_handler();
+	}
 
 	return 0;
 }
@@ -3011,6 +3381,7 @@ static int chg_error_handler(struct smb1360_chip *chip, u8 rt_stat)
 					chip->safety_time);
 		}
 
+		smb1360_ext_charging_disable(chip, true);
 		g_chg_error = 1;
 		
 		rc = smb1360_charging_disable(chip, USER, true);
@@ -3033,6 +3404,8 @@ static int chg_error_handler(struct smb1360_chip *chip, u8 rt_stat)
 					USB_CTRL_MASK, USB_AC_BIT);
 			if (rc)
 				pr_err("Couldn't configure for USB AC rc=%d\n", rc);
+
+			smb1360_ext_charging_disable(chip, false);
 		}
 
 		
@@ -3219,41 +3592,6 @@ static int smb1360_adjust_current_gain(struct smb1360_chip *chip,
 	return 0;
 }
 
-static int update_profile_setting_for_csir2289(struct smb1360_chip *chip)
-{
-	int	rc, i, j;
-	u8	reg;
-	u8	reg_val_mapping[][3] = {
-	
-		{0xE4, 0x56, 0x54},
-		{0xE5, 0xCD, 0x34},
-		{0xE6, 0x57, 0x55},
-		{0xE7, 0x70, 0x71},
-		{0xE8, 0x5A, 0x56},
-		{0xE9, 0x00, 0x9B},
-		{0xEA, 0x5B, 0x57},
-		{0xEB, 0x83, 0x71},
-		{0xF0, 0x5A, 0x5A},
-		{0xF1, 0x00, 0x00},
-	};
-
-	j = (BATTERY_PROFILE_A == chip->profile_in_use) ? 1 : 2;
-	for (i = 0; i < ARRAY_SIZE(reg_val_mapping); i++) {
-		rc = smb1360_fg_write(chip, reg_val_mapping[i][0],
-									reg_val_mapping[i][j]);
-		if (rc) {
-			pr_err("write address 0x%x failed, rc = %d\n",
-									reg_val_mapping[i][0], rc);
-			return rc;
-		} else {
-			smb1360_fg_read(chip, reg_val_mapping[i][0], &reg);
-			pr_err("0x%x = 0x%x\n", reg_val_mapping[i][0], reg);
-		}
-	}
-
-	return 0;
-}
-
 static int smb1360_otp_gain_config(struct smb1360_chip *chip, int gain_factor)
 {
 	int rc = 0;
@@ -3276,9 +3614,6 @@ static int smb1360_otp_gain_config(struct smb1360_chip *chip, int gain_factor)
 		pr_err("Unable to modify current gain rc=%d\n", rc);
 		goto restore_fg;
 	}
-
-	if (chip->csir_correction != NULL && chip->csir_correction->csir2289 == true)
-		update_profile_setting_for_csir2289(chip);
 
 	rc = smb1360_masked_write(chip, CFG_FG_BATT_CTRL_REG,
 			CFG_FG_OTP_BACK_UP_ENABLE, CFG_FG_OTP_BACK_UP_ENABLE);
@@ -4263,6 +4598,23 @@ static int smb1360_get_input_current_limit(struct smb1360_chip *chip)
 	return input_curr_lmt;
 }
 
+static int smb1360_get_input_current_limit_status(struct smb1360_chip *chip)
+{
+	u8 val;
+	int input_curr_lmt_status = 0;
+	int rc;
+
+	rc = smb1360_read_bytes(chip, 0x48, &val, 1);
+	if (rc)
+		pr_err("Couldn't read ICL mA rc=%d\n", rc);
+	else {
+		val &= INPUT_CURR_LIM_MASK;
+		input_curr_lmt_status = input_current_limit[val];
+	}
+
+	return input_curr_lmt_status;
+}
+
 static int smb1360_get_fast_chg_current_limit(struct smb1360_chip *chip)
 {
 	u8 val;
@@ -4401,7 +4753,7 @@ static void dump_all(void)
 	host_mode = smb1360_otg_regulator_is_enable(the_chip->otg_vreg.rdev);
 	usbin = smb1360_get_usbin(the_chip);
 
-	pr_info("V=%d mV,I=%d mA,T=%d C,SoC=%d%%,SoC_raw=%d%%,id=%d,id_mv=%d mV,"
+	pr_info("V=%d mV,I=%d mA,T=%d C,SoC=%d%%,id=%d,id_mv=%d mV,"
 			"H=%d,P=%d,CHG=%d,S=%d,"
 			"ac_online=%d,vbus_online=%d,iusb_max_ma=%d,ibat_max=%d,"
 			"OVP=%d,UVP=%d,TM=%d,"
@@ -4410,7 +4762,7 @@ static void dump_all(void)
 			"flag=%d%d%d%d,"
 			"host=%d,"
 			"fastchg=%d,taperchg=%d, usbin=%d\n",
-			vbat_mv, ibat_ma, tbat_deg, soc, the_chip->soc_raw, batt_id, batt_id_mv,
+			vbat_mv, ibat_ma, tbat_deg, soc, batt_id, batt_id_mv,
 			health, present, charger_type, status,
 			ac_online, vbus_online, iusb_max_ma, ibat_max_ma,
 			ovp, uvp, the_chip->therm_lvl_sel,
@@ -4490,9 +4842,6 @@ static int smb1360_check_batt_profile(struct smb1360_chip *chip)
 	loaded_profile = !!(reg & BATTERY_PROFILE_BIT) ?
 			BATTERY_PROFILE_B : BATTERY_PROFILE_A;
 
-#ifndef CONFIG_HTC_BATT_8960
-	chip->profile_in_use = loaded_profile;
-#endif
 	pr_info("fg_batt_status=%x loaded_profile=%d\n", reg, loaded_profile);
 
 #ifndef CONFIG_HTC_BATT_8960
@@ -4515,7 +4864,6 @@ static int smb1360_check_batt_profile(struct smb1360_chip *chip)
 		} else {
 			new_profile = (loaded_profile == BATTERY_PROFILE_A) ?
 					BATTERY_PROFILE_B : BATTERY_PROFILE_A;
-			chip->profile_in_use = new_profile;
 			bid_mask = (new_profile == BATTERY_PROFILE_A) ?
 					BATT_PROFILEA_MASK : BATT_PROFILEB_MASK;
 			pr_info("Loaded Profile-RID != connected-RID, switch-profile old_profile=%d new_profile=%d\n",
@@ -4536,8 +4884,6 @@ static int smb1360_check_batt_profile(struct smb1360_chip *chip)
 			bid_mask = BATT_PROFILEA_MASK;
 			break;
 	}
-
-	chip->profile_in_use = new_profile;
 
 	if (new_profile == loaded_profile) {
 		pr_info("Loaded Profile-RID == connected-RID\n");
@@ -4637,6 +4983,9 @@ fail_profile:
 	return rc;
 }
 
+#define UPDATE_IRQ_STAT(irq_reg, value) \
+		handlers[irq_reg - IRQ_A_REG].prev_val = value;
+
 static int determine_initial_status(struct smb1360_chip *chip)
 {
 	int rc;
@@ -4648,6 +4997,8 @@ static int determine_initial_status(struct smb1360_chip *chip)
 		dev_err(chip->dev, "Couldn't read IRQ_B_REG rc = %d\n", rc);
 		return rc;
 	}
+	UPDATE_IRQ_STAT(IRQ_B_REG, reg);
+
 	if (reg & IRQ_B_BATT_TERMINAL_BIT || reg & IRQ_B_BATT_MISSING_BIT)
 		chip->batt_present = false;
 
@@ -4656,6 +5007,8 @@ static int determine_initial_status(struct smb1360_chip *chip)
 		dev_err(chip->dev, "Couldn't read IRQ_C_REG rc = %d\n", rc);
 		return rc;
 	}
+	UPDATE_IRQ_STAT(IRQ_C_REG, reg);
+
 	if (reg & IRQ_C_CHG_TERM)
 		chip->batt_full = true;
 
@@ -4664,6 +5017,7 @@ static int determine_initial_status(struct smb1360_chip *chip)
 		dev_err(chip->dev, "Couldn't read irq A rc = %d\n", rc);
 		return rc;
 	}
+	UPDATE_IRQ_STAT(IRQ_A_REG, reg);
 
 	if (reg & IRQ_A_HOT_HARD_BIT)
 		chip->batt_hot = true;
@@ -4679,6 +5033,8 @@ static int determine_initial_status(struct smb1360_chip *chip)
 		dev_err(chip->dev, "Couldn't read irq E rc = %d\n", rc);
 		return rc;
 	}
+	UPDATE_IRQ_STAT(IRQ_E_REG, reg);
+
 #ifdef CONFIG_HTC_BATT_8960
 	
 	cable_detection_vbus_irq_handler();
@@ -4697,8 +5053,8 @@ static int smb1360_fg_config(struct smb1360_chip *chip)
 
 	if (!(chip->workaround_flags & WRKRND_FG_CONFIG_FAIL)) {
 		if (chip->delta_soc != -EINVAL) {
-			reg = DIV_ROUND_UP(chip->delta_soc * MAX_8_BITS, 100);
-			pr_info("delta_soc=%d reg=%x\n", chip->delta_soc, reg);
+			reg = abs(((chip->delta_soc * MAX_8_BITS) / 100) - 1);
+			pr_debug("delta_soc=%d reg=%x\n", chip->delta_soc, reg);
 			rc = smb1360_write(chip, SOC_DELTA_REG, reg);
 			if (rc) {
 				dev_err(chip->dev, "Couldn't write to SOC_DELTA_REG rc=%d\n",
@@ -5004,61 +5360,6 @@ static inline int smb1360_poweron(struct smb1360_chip *chip)
 	return smb1360_enable(chip, true);
 }
 
-static int update_charger_setting_for_csir2289(struct smb1360_chip *chip)
-{
-	int	rc, i;
-	u8	reg;
-	u8	reg_val_mapping[][3] = {
-	
-		{0x00, 0xB3, 0xB1},
-		{0x01, 0x05, 0x47},
-		{0x04, 0x84, 0x04},
-		{0x05, 0x2A, 0x6A},
-		{0x08, 0x11, 0x19},
-		{0x09, 0x20, 0x30},
-		{0x0A, 0x0A, 0x0F},
-		{0x0B, 0x65, 0x64},
-		{0x0C, 0x08, 0x09},
-		{0x0E, 0xB0, 0xB1},
-		{0x0F, 0x00, 0xFF},
-		{0x10, 0x00, 0xFF},
-		{0x11, 0x00, 0xFF},
-		{0x12, 0x98, 0x8C},
-		{0x13, 0x92, 0x9E},
-		{0x14, 0x00, 0xF0},
-		{0x16, 0x19, 0x14},
-		{0x17, 0x1E, 0x1A},
-	};
-
-	for (i = 0; i < ARRAY_SIZE(reg_val_mapping); i++) {
-		rc = smb1360_write(chip, reg_val_mapping[i][0],
-									reg_val_mapping[i][2]);
-		if (rc) {
-			pr_err("write address 0x%x failed, rc = %d\n",
-									reg_val_mapping[i][0], rc);
-			return rc;
-		} else {
-			smb1360_read(chip, reg_val_mapping[i][0], &reg);
-			pr_err("0x%x = 0x%x\n", reg_val_mapping[i][0], reg);
-		}
-	}
-
-	return 0;
-}
-
-static int smb1360_update_setting(struct smb1360_chip *chip)
-{
-	chip->pulsed_irq = chip->csir_correction->irq_pulse;
-	if (chip->profile_in_use == BATTERY_PROFILE_A)
-		chip->vfloat_mv = chip->csir_correction->profile_a.vfloat_mv;
-	else
-		chip->vfloat_mv = chip->csir_correction->profile_b.vfloat_mv;
-	if (chip->csir_correction->csir2289 == true)
-		update_charger_setting_for_csir2289(chip);
-
-	return 0;
-}
-
 static int smb1360_hw_init(struct smb1360_chip *chip)
 {
 	int rc;
@@ -5080,16 +5381,6 @@ static int smb1360_hw_init(struct smb1360_chip *chip)
 			pr_err("smb1360 power on failed\n");
 			return rc;
 		}
-	}
-
-	rc = smb1360_check_batt_profile(chip);
-	if (rc)
-		pr_err("Unable to modify battery profile\n");
-
-	if (chip->csir_correction != NULL) {
-		rc = smb1360_update_setting(chip);
-		if (rc)
-			pr_err("Unable to update settings\n");
 	}
 
 	if (chip->rsense_10mohm) {
@@ -5118,6 +5409,10 @@ static int smb1360_hw_init(struct smb1360_chip *chip)
 			return rc;
 		}
 	}
+
+	rc = smb1360_check_batt_profile(chip);
+	if (rc)
+		pr_err("Unable to modify battery profile\n");
 
 	rc = smb1360_masked_write(chip, CFG_CHG_MISC_REG,
 					CHG_EN_BY_PIN_BIT
@@ -5360,9 +5655,8 @@ static int smb1360_hw_init(struct smb1360_chip *chip)
 
 	
 	if (chip->batt_id_disabled) {
-		mask = BATT_ID_ENABLED_BIT | CHG_BATT_ID_FAIL
-				| BATT_ID_FAIL_SELECT_PROFILE;
-		reg = CHG_BATT_ID_FAIL | BATT_ID_FAIL_SELECT_PROFILE;
+		mask = BATT_ID_ENABLED_BIT | CHG_BATT_ID_FAIL;
+		reg = CHG_BATT_ID_FAIL;
 		rc = smb1360_masked_write(chip, CFG_FG_BATT_CTRL_REG,
 						mask, reg);
 		if (rc < 0) {
@@ -5752,6 +6046,9 @@ static int smb_parse_dt(struct smb1360_chip *chip)
 	if (rc < 0)
 		chip->voltage_empty_re_check_mv = -EINVAL;
 
+	chip->wa_to_re_calc_soc_in_low_temp = of_property_read_bool(node,
+					"htc,wa-to-re-calc-soc-in-low-temp");
+
 	chip->pm8916_enabled = of_property_read_bool(node,
 						"htc,pm8916-enabled");
 
@@ -5763,7 +6060,12 @@ static int smb_parse_dt(struct smb1360_chip *chip)
 	rc = of_property_read_u32(node, "htc,pm8916-max-input-curr-limit",
 					&chip->pm8916_max_input_curr_limit);
 	if (rc < 0)
-		chip->pm8916_max_input_curr_limit = -EINVAL;
+		chip->pm8916_max_input_curr_limit = PM8916_MAX_INPUT_CURR_LIMIT;
+
+	rc = of_property_read_u32(node, "htc,r-hw-mb-impedance",
+					&gs_R_HW_MB_Impedance);
+	if (rc < 0)
+		gs_R_HW_MB_Impedance = -EINVAL;
 
 	return 0;
 }
@@ -5777,7 +6079,6 @@ static int smb1360_probe(struct i2c_client *client,
 #ifndef CONFIG_HTC_BATT_8960
 	struct power_supply *usb_psy;
 #endif
-	const struct of_device_id	*match = NULL;
 
 	flag_keep_charge_on =
 		(get_kernel_flag() & KERNEL_FLAG_KEEP_CHARG_ON) ? 1 : 0;
@@ -5802,6 +6103,7 @@ static int smb1360_probe(struct i2c_client *client,
 		return -ENOMEM;
 	}
 
+	chip->resume_completed = true;
 	chip->client = client;
 	chip->dev = &client->dev;
 #ifndef CONFIG_HTC_BATT_8960
@@ -5814,7 +6116,13 @@ static int smb1360_probe(struct i2c_client *client,
 	rc = smb1360_read(chip, CFG_BATT_CHG_REG, &reg);
 	if (rc) {
 		pr_err("Failed to detect SMB1360 0x%X, device may be absent\n", client->addr);
-		return -ENODEV;
+
+		client->addr = 0x14;
+		rc = smb1360_read(chip, CFG_BATT_CHG_REG, &reg);
+		if (rc) {
+			pr_err("Failed to detect SMB1360 0x%X, device may be absent\n", client->addr);
+			return -ENODEV;
+		}
 	}
 
 	rc = read_revision(chip, &chip->revision);
@@ -5828,25 +6136,16 @@ static int smb1360_probe(struct i2c_client *client,
 		return rc;
 	}
 
-	match = of_match_node(smb1360_match_table, client->dev.of_node);
-	if (match == NULL) {
-		dev_err(&client->dev, "device tree match not found\n");
-		return -EINVAL;
-	}
-
-	if (match->data != NULL)
-		chip->csir_correction =
-			(struct smb1360_csir_correction *)(match->data);
-
-	rc = set_battery_data(chip);
-	if (rc) {
-		pr_err("Bad battery data %d\n", rc);
-		return rc;
+	if (chip->wa_to_re_calc_soc_in_low_temp) {
+		rc = set_battery_data(chip);
+		if (rc) {
+			pr_err("Bad battery data %d\n", rc);
+			return rc;
+		}
 	}
 
 	device_init_wakeup(chip->dev, 1);
 	i2c_set_clientdata(client, chip);
-	chip->resume_completed = true;
 	mutex_init(&chip->irq_complete);
 	mutex_init(&chip->charging_disable_lock);
 	mutex_init(&chip->current_change_lock);
@@ -5899,9 +6198,14 @@ static int smb1360_probe(struct i2c_client *client,
 	INIT_DELAYED_WORK(&chip->kick_wd_work, smb1360_kick_wd_work);
 	INIT_DELAYED_WORK(&chip->eoc_work, smb1360_eoc_work);
 	INIT_DELAYED_WORK(&chip->aicl_work, smb1360_aicl_work);
+	INIT_DELAYED_WORK(&chip->vin_collapse_check_work,
+					vin_collapse_check_worker);
+	INIT_DELAYED_WORK(&chip->cable_impedance_work, cable_impedance_worker);
 
 	wake_lock_init(&chip->eoc_worker_lock, WAKE_LOCK_SUSPEND,
 			"smb1360_eoc_worker_lock");
+	wake_lock_init(&chip->vin_collapse_check_wake_lock,
+			WAKE_LOCK_SUSPEND, "vin_collapse_check_wake_lock");
 
 	
 	if (client->irq)
@@ -6049,6 +6353,11 @@ static int smb1360_probe(struct i2c_client *client,
 	htc_charger_event_notify(HTC_CHARGER_EVENT_READY);
 	htc_gauge_event_notify(HTC_GAUGE_EVENT_READY);
 
+	if (chip->batt_full) {
+		is_batt_full_eoc_stop = true;
+		htc_gauge_event_notify(HTC_GAUGE_EVENT_EOC_STOP_CHG);
+	}
+
 	return 0;
 
 unregister_batt_psy:
@@ -6181,6 +6490,11 @@ static const struct dev_pm_ops smb1360_pm_ops = {
 	.resume		= smb1360_resume,
 	.suspend_noirq	= smb1360_suspend_noirq,
 	.suspend	= smb1360_suspend,
+};
+
+static struct of_device_id smb1360_match_table[] = {
+	{ .compatible = "qcom,smb1360-chg-fg",},
+	{ },
 };
 
 static const struct i2c_device_id smb1360_id[] = {

@@ -25,6 +25,8 @@
 #include "mmc_ops.h"
 #include "sd_ops.h"
 
+extern char *board_mid(void);
+extern char *board_cid(void);
 static const unsigned int tran_exp[] = {
 	10000,		100000,		1000000,	10000000,
 	0,		0,		0,		0
@@ -66,7 +68,6 @@ static const struct mmc_fixup mmc_fixups[] = {
 	MMC_FIXUP_EXT_CSD_REV("MMC16G", CID_MANFID_KINGSTON, CID_OEMID_ANY,
 			add_quirk, MMC_QUIRK_BROKEN_HPI, 5),
 
-#if 0
 	MMC_FIXUP("H8G2d", CID_MANFID_HYNIX, CID_OEMID_ANY, add_quirk_mmc,
 		  MMC_QUIRK_CACHE_DISABLE),
       
@@ -81,23 +82,6 @@ static const struct mmc_fixup mmc_fixups[] = {
 
 	MMC_FIXUP(CID_NAME_ANY, CID_MANFID_NUMONYX_MICRON, CID_OEMID_ANY,
 		add_quirk_mmc, MMC_QUIRK_CACHE_DISABLE),
-#endif
-	MMC_FIXUP("MAG2GC", CID_MANFID_SAMSUNG, CID_OEMID_ANY, remove_quirk_mmc,
-		  MMC_QUIRK_CACHE_DISABLE),
-	MMC_FIXUP("AWPD3R", CID_MANFID_SAMSUNG, CID_OEMID_ANY, remove_quirk_mmc,
-		  MMC_QUIRK_CACHE_DISABLE),
-	MMC_FIXUP("BWBC3R", CID_MANFID_SAMSUNG, CID_OEMID_ANY, remove_quirk_mmc,
-		  MMC_QUIRK_CACHE_DISABLE),
-	MMC_FIXUP("SEM16G", CID_MANFID_SANDISK, CID_OEMID_ANY, remove_quirk_mmc,
-		  MMC_QUIRK_CACHE_DISABLE),
-	MMC_FIXUP("SEM32G", CID_MANFID_SANDISK, CID_OEMID_ANY, remove_quirk_mmc,
-		  MMC_QUIRK_CACHE_DISABLE),
-	MMC_FIXUP("HAG4d", CID_MANFID_HYNIX, CID_OEMID_ANY, remove_quirk_mmc,
-		  MMC_QUIRK_CACHE_DISABLE),
-	MMC_FIXUP("HBG4e", CID_MANFID_HYNIX, CID_OEMID_ANY, remove_quirk_mmc,
-		  MMC_QUIRK_CACHE_DISABLE),
-	MMC_FIXUP("HAG2e", CID_MANFID_HYNIX, CID_OEMID_ANY, remove_quirk_mmc,
-		  MMC_QUIRK_CACHE_DISABLE),
 
 	END_FIXUP
 };
@@ -321,15 +305,6 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 	}
 
 	card->ext_csd.rev = ext_csd[EXT_CSD_REV];
-	if (card->ext_csd.rev > 7) {
-		pr_err("%s: unrecognised EXT_CSD revision %d\n",
-			mmc_hostname(card->host), card->ext_csd.rev);
-		err = -EINVAL;
-		goto out;
-	}
-
-	if (mmc_card_mmc(card))
-		card->quirks |= MMC_QUIRK_CACHE_DISABLE;
 
 	
 	mmc_fixup_device(card, mmc_fixups);
@@ -344,6 +319,17 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			ext_csd[EXT_CSD_SEC_CNT + 1] << 8 |
 			ext_csd[EXT_CSD_SEC_CNT + 2] << 16 |
 			ext_csd[EXT_CSD_SEC_CNT + 3] << 24;
+
+		if (board_mid() && !strncmp(board_mid(), "0PHC10000", 9) &&
+		    (card->ext_csd.sectors > 33554432)) {
+			if (board_cid() &&
+			    (!strncmp(board_cid(), "HTC__J15", 8) ||
+			    !strncmp(board_cid(), "HTC__001", 8) ||
+			    !strncmp(board_cid(), "HTC__044", 8) ||
+			    !strncmp(board_cid(), "HTC__038", 8) ||
+			    !strncmp(board_cid(), "HTC__059", 8)))
+				card->ext_csd.sectors = 30785535;
+		}
 
 		
 		if (card->ext_csd.sectors > (2u * 1024 * 1024 * 1024) / 512)
@@ -594,6 +580,8 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			else if (card->ext_csd.rev > 6)
 				card->cid.fwrev =
 				ext_csd[EXT_CSD_VENDOR_SPECIFIC_FIELDS_258] - 0x30 ;
+		} else if (card->cid.manfid == CID_MANFID_MICRON) {
+			card->cid.fwrev = ext_csd[EXT_CSD_VENDOR_SPECIFIC_FIELDS_258];
 		}
 
 		if ((card->cid.manfid == CID_MANFID_HYNIX) && !strncmp(card->cid.prod_name, "HAG2e", 5)
@@ -1659,12 +1647,6 @@ static int mmc_suspend(struct mmc_host *host)
 		return -EBUSY;
 
 	mmc_disable_clk_scaling(host);
-
-	if (host->card && mmc_card_need_bkops_in_suspend(host->card)) {
-		pr_info("%s: Force bkops and let card not sleep\n",
-			mmc_hostname(host));
-		goto out;
-	}
 
 	err = mmc_cache_ctrl(host, 0);
 	if (err)

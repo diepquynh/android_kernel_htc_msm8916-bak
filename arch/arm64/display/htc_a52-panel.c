@@ -8,11 +8,10 @@
 #include <asm/debug_display.h>
 #include "../../../drivers/video/msm/mdss/mdss_dsi.h"
 
+/* HTC: dsi_power_data overwrite the role of dsi_drv_cm_data
+   in mdss_dsi_ctrl_pdata structure */
 struct dsi_power_data {
-	uint32_t sysrev;         
-	struct regulator *vddio; 	
-	struct regulator *vdda;  	
-	struct regulator *vddpll;    
+	uint32_t sysrev;         /* system revision info */
 	int lcmp5v;
 	int lcmn5v;
 	int lcm_ldo_1v8_en;
@@ -105,7 +104,7 @@ static int lv52130_add_i2c(struct i2c_client *client)
 	struct i2c_adapter *adapter = client->adapter;
 	int idx;
 
-	
+	/* "Hotplug" the MHL transmitter device onto the 2nd I2C bus  for BB-xM or 4th for pandaboard*/
 	i2c_bus_adapter = adapter;
 	if (i2c_bus_adapter == NULL) {
 		PR_DISP_ERR("%s() failed to get i2c adapter\n", __func__);
@@ -191,7 +190,6 @@ static struct i2c_driver lv52130_tx_i2c_driver = {
 
 static int htc_a52_regulator_init(struct platform_device *pdev)
 {
-	int ret = 0;
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
 	struct dsi_power_data *pwrdata = NULL;
 
@@ -216,35 +214,6 @@ static int htc_a52_regulator_init(struct platform_device *pdev)
 
 	ctrl_pdata->dsi_pwrctrl_data = pwrdata;
 
-	pwrdata->vdda = devm_regulator_get(&pdev->dev, "vdda");
-	if (IS_ERR(pwrdata->vdda)) {
-		PR_DISP_ERR("%s: could not get vdda vreg, rc=%ld\n",
-			__func__, PTR_ERR(pwrdata->vdda));
-		return PTR_ERR(pwrdata->vdda);
-	}
-
-	
-	ret = regulator_set_voltage(pwrdata->vdda, 1200000, 1200000);
-	if (ret) {
-		PR_DISP_ERR("%s: set voltage failed on vdda vreg, rc=%d\n",
-			__func__, ret);
-		return ret;
-	}
-
-	pwrdata->vddpll = devm_regulator_get(&pdev->dev, "vddio");
-	if (IS_ERR(pwrdata->vdda)) {
-		PR_DISP_ERR("%s: could not get vdda vreg, rc=%ld\n",
-			__func__, PTR_ERR(pwrdata->vdda));
-		return PTR_ERR(pwrdata->vdda);
-	}
-
-	
-	ret = regulator_set_voltage(pwrdata->vddpll, 1800000, 1800000);
-	if (ret) {
-		PR_DISP_ERR("%s: set voltage failed on vdda vreg, rc=%d\n",
-			__func__, ret);
-		return ret;
-	}
 	pwrdata->lcmp5v = of_get_named_gpio(pdev->dev.of_node,
 						"htc,lcm_p5v-gpio", 0);
 	pwrdata->lcmn5v = of_get_named_gpio(pdev->dev.of_node,
@@ -258,7 +227,9 @@ static int htc_a52_regulator_init(struct platform_device *pdev)
 static int htc_a52_regulator_deinit(struct platform_device *pdev)
 {
 	class_unregister(&lv52130_class);
-	
+	/* devm_regulator() will automatically free regulators
+	   while dev detach. */
+	/* nothing */
 	return 0;
 }
 
@@ -294,14 +265,14 @@ void htc_a52_panel_reset(struct mdss_panel_data *pdata, int enable)
 		usleep_range(10000, 10500);
 		gpio_set_value(pwrdata->lcm_ldo_1v8_en, 1);
 		usleep_range(10000, 10500);
-		
+		/* enable AVDD+, +5.4V*/
 		gpio_set_value(pwrdata->lcmp5v, 1);
 		usleep_range(10000, 10500);
-		
+		/* enable AVDD-*/
 		gpio_set_value(pwrdata->lcmn5v, 1);
-		
+		/*enable +-5.4v*/
 		usleep_range(30000, 30500);
-		
+		/*set +-5.4v*/
 		avdd_level = 0x0E;
 		avdd_mode = 0x43;
 		platform_write_i2c_block(i2c_bus_adapter,0x7C,0x00, 0x01, &avdd_level);
@@ -314,10 +285,10 @@ void htc_a52_panel_reset(struct mdss_panel_data *pdata, int enable)
 		usleep_range(5000,5500);
 		gpio_set_value(ctrl_pdata->rst_gpio, 0);
 		usleep_range(10000,10500);
-		
+		/* disable AVDD-*/
 		gpio_set_value(pwrdata->lcmn5v, 0);
 		usleep_range(10000,10500);
-		
+		/* disable AVDD+, +5.5V*/
 		gpio_set_value(pwrdata->lcmp5v, 0);
 		usleep_range(10000,10500);
 		gpio_set_value(pwrdata->lcm_ldo_1v8_en, 0);
@@ -326,11 +297,8 @@ void htc_a52_panel_reset(struct mdss_panel_data *pdata, int enable)
 	PR_DISP_INFO("%s: enable = %d done\n", __func__, enable);
 }
 
-extern void set_screen_status(bool onoff);
-
 static int htc_a52_panel_power_on(struct mdss_panel_data *pdata, int enable)
 {
-	int ret;
 
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
 	struct dsi_power_data *pwrdata = NULL;
@@ -347,66 +315,6 @@ static int htc_a52_panel_power_on(struct mdss_panel_data *pdata, int enable)
 	if (!pwrdata) {
 		PR_DISP_ERR("%s: pwrdata not initialized\n", __func__);
 		return -EINVAL;
-	}
-
-	if (enable) {
-		ret = regulator_set_optimum_mode(pwrdata->vdda, 100000);
-		if (ret < 0) {
-			PR_DISP_ERR("%s: vdda set opt mode failed.\n",
-				__func__);
-			return ret;
-		}
-
-		ret = regulator_set_optimum_mode(pwrdata->vddpll, 100000);
-		if (ret < 0) {
-			PR_DISP_ERR("%s: vddpll set opt mode failed.\n",
-				__func__);
-			return ret;
-		}
-
-		
-		ret = regulator_enable(pwrdata->vdda);
-		if (ret) {
-			PR_DISP_ERR("%s: Failed to enable regulator.\n",__func__);
-			return ret;
-		}
-
-		
-		ret = regulator_enable(pwrdata->vddpll);
-		if (ret) {
-			PR_DISP_ERR("%s: Failed to enable regulator.\n",__func__);
-			return ret;
-		}
-		set_screen_status(true);
-	} else {
-		
-		ret = regulator_disable(pwrdata->vdda);
-		if (ret) {
-			PR_DISP_ERR("%s: Failed to disable vdda regulator.\n",
-				__func__);
-			return ret;
-		}
-		
-		ret = regulator_disable(pwrdata->vddpll);
-		if (ret) {
-			PR_DISP_ERR("%s: Failed to disable regulator.\n",
-				__func__);
-			return ret;
-		}
-		ret = regulator_set_optimum_mode(pwrdata->vddpll, 100);
-		if (ret < 0) {
-			PR_DISP_ERR("%s: vddpll_vreg set opt mode failed.\n",
-				__func__);
-			return ret;
-		}
-
-		ret = regulator_set_optimum_mode(pwrdata->vdda, 100);
-		if (ret < 0) {
-			PR_DISP_ERR("%s: vdda_vreg set opt mode failed.\n",
-				__func__);
-			return ret;
-		}
-		set_screen_status(false);
 	}
 	PR_DISP_INFO("%s: en=%d done\n", __func__, enable);
 

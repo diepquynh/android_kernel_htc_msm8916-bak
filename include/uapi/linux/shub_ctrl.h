@@ -3,6 +3,7 @@
 
 #define SHUB_DLOAD_SUPPORT 1
 #define SHUB_LOGGING_SUPPORT 1
+#define SHUB_EVENT_SUPPORT 1
 #define SHUB_FIRMWARE_UPDATE_SUPPORT 1
 
 #ifdef SHUB_DLOAD_SUPPORT
@@ -48,12 +49,23 @@ typedef struct {
     uint8_t project_mapping;
 } mcu_fw_version_t;
 
+typedef struct {
+    uint8_t jenkins_num_hi;
+    uint8_t jenkins_num_lo;
+    uint8_t build_time_hh;
+    uint8_t build_time_mm;
+    uint8_t cw_branch;
+    uint8_t cw_mcu_type;
+} mcu_fw_info_t;
+
 #define SHUB_FIRMWARE_UPDATE_DEVICE_NAME        "shub_fw_fla"
 #define SHUB_FW_IOCTL_CODE                      (0xCC)
 #define SHUB_FW_IOCTL_PRE_FLASH                 _IO(SHUB_FW_IOCTL_CODE, 1)
 #define SHUB_FW_IOCTL_POST_FLASH                _IO(SHUB_FW_IOCTL_CODE, 2)
 #define SHUB_FW_IOCTL_GET_FW_VERSION            _IOR(SHUB_FW_IOCTL_CODE, 3, mcu_fw_version_t)
 #define SHUB_FW_IOCTL_GET_FW_CHECKSUM           _IOR(SHUB_FW_IOCTL_CODE, 4, uint32_t)
+#define SHUB_FW_IOCTL_GET_FW_INFO               _IOR(SHUB_FW_IOCTL_CODE, 5, mcu_fw_info_t)
+#define SHUB_FW_IOCTL_START_FW_CHECKSUM         _IOW(SHUB_FW_IOCTL_CODE, 6, uint32_t)
 #endif 
 
 #endif 

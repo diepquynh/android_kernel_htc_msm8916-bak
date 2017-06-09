@@ -17,6 +17,7 @@
 #include <linux/io.h>
 #include <linux/mmc/host.h>
 #include <linux/pm_qos.h>
+#include <linux/ratelimit.h>
 
 struct sdhci_next {
 	unsigned int sg_count;
@@ -25,15 +26,26 @@ struct sdhci_next {
 
 enum sdhci_power_policy {
 	SDHCI_PERFORMANCE_MODE,
+	SDHCI_PERFORMANCE_MODE_INIT,
 	SDHCI_POWER_SAVE_MODE,
+};
+
+struct sdhci_host_qos {
+	unsigned int *cpu_dma_latency_us;
+	unsigned int cpu_dma_latency_tbl_sz;
+	struct pm_qos_request pm_qos_req_dma;
+};
+
+enum sdhci_host_qos_policy {
+	SDHCI_QOS_READ_WRITE,
+	SDHCI_QOS_READ,
+	SDHCI_QOS_WRITE,
+	SDHCI_QOS_MAX_POLICY,
 };
 
 struct sdhci_host {
 	
 	const char *hw_name;	
-	int reset_wa_applied;
-	int reset_wa_cnt;
-	int cmd_cnt;
 
 	unsigned int quirks;	
 
@@ -84,10 +96,11 @@ struct sdhci_host {
 #define SDHCI_QUIRK2_BROKEN_PRESET_VALUE		(1<<9)
 #define SDHCI_QUIRK2_USE_RESERVED_MAX_TIMEOUT		(1<<10)
 #define SDHCI_QUIRK2_DIVIDE_TOUT_BY_4 (1 << 11)
-
 #define SDHCI_QUIRK2_IGN_DATA_END_BIT_ERROR             (1<<12)
 
 #define SDHCI_QUIRK2_ADMA_SKIP_DATA_ALIGNMENT             (1<<13)
+#define SDHCI_QUIRK2_BROKEN_LED_CONTROL	(1 << 14)
+#define SDHCI_QUIRK2_USE_RESET_WORKAROUND (1 << 15)
 
 	int irq;		
 	void __iomem *ioaddr;	
@@ -177,10 +190,13 @@ struct sdhci_host {
 #define SDHCI_TUNING_MODE_1	0
 	struct timer_list	tuning_timer;	
 
-	unsigned int cpu_dma_latency_us;
-	struct pm_qos_request pm_qos_req_dma;
+	struct sdhci_host_qos host_qos[SDHCI_QOS_MAX_POLICY];
+	enum sdhci_host_qos_policy last_qos_policy;
+
+	bool host_use_default_qos;
 	unsigned int pm_qos_timeout_us;         
 	struct device_attribute pm_qos_tout;
+	struct delayed_work pm_qos_work;
 
 	struct sdhci_next next_data;
 	ktime_t data_start_time;
@@ -191,6 +207,11 @@ struct sdhci_host {
 	bool async_int_supp;  
 	bool disable_sdio_irq_deferred; 
 	u32 auto_cmd_err_sts;
+	struct ratelimit_state dbg_dump_rs;
+	int reset_wa_applied; 
+	ktime_t reset_wa_t; 
+	int reset_wa_cnt; 
+
 	unsigned long private[0] ____cacheline_aligned;
 };
 #endif 

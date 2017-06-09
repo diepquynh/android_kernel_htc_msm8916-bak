@@ -23,6 +23,12 @@ static struct msm_sensor_ctrl_t imx214_s_ctrl;
 static struct msm_sensor_power_setting imx214_power_setting[] = {
 	{
 		.seq_type = SENSOR_VREG,
+		.seq_val = CAM_V_CUSTOM1,
+		.config_val = 1,
+		.delay = 1,
+	},
+	{
+		.seq_type = SENSOR_VREG,
 		.seq_val = CAM_VIO,
 		.config_val = 1,
 		.delay = 1,
@@ -105,6 +111,12 @@ static struct msm_sensor_power_setting imx214_power_down_setting[] = {
 	{
 		.seq_type = SENSOR_VREG,
 		.seq_val = CAM_VIO,
+		.config_val = 0,
+		.delay = 1,
+	},
+	{
+		.seq_type = SENSOR_VREG,
+		.seq_val = CAM_V_CUSTOM1,
 		.config_val = 0,
 		.delay = 1,
 	},
@@ -247,7 +259,7 @@ static int imx214_read_fuseid(struct sensorb_cfg_data *cdata,
     int valid_layer = -1;
     
     static int read_otp = true;
-    uint8_t *path= "/data/OTPData.dat";
+    uint8_t *path= "/data/misc/camera/OTPData.dat";
     static uint8_t otp_mem[DUAL_CAL_OTP_SIZE];
     struct file* f;
     
@@ -391,7 +403,7 @@ static int imx214_read_fuseid32(struct sensorb_cfg_data32 *cdata,
     int valid_layer = -1;
     
     static int read_otp = true;
-    uint8_t *path= "/data/OTPData.dat";
+    uint8_t *path= "/data/misc/camera/OTPData.dat";
     static uint8_t otp_mem[DUAL_CAL_OTP_SIZE];
     struct file* f;
     
@@ -509,8 +521,8 @@ static int imx214_read_fuseid32(struct sensorb_cfg_data32 *cdata,
     pr_info("%s: OTP VCM top mech. Limit (MSByte) = 0x%x\n",    __func__,  cdata->af_value.VCM_TOP_MECH_MSB);
     pr_info("%s: OTP VCM top mech. Limit (LSByte) = 0x%x\n",    __func__,  cdata->af_value.VCM_TOP_MECH_LSB);
 
-    
-    
+    strlcpy(cdata->af_value.ACT_NAME, "lc898212_act", sizeof("lc898212_act"));
+    pr_info("%s: OTP Actuator Name = %s\n",__func__, cdata->af_value.ACT_NAME);
 
 	}
 	else

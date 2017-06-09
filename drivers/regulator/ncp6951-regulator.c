@@ -83,8 +83,6 @@ extern int ncp6951_flt_reg_init(void);
 
 static int use_ioexpander = 0;
 
-static int has_load_switch = 0;
-
 #ifdef CONFIG_HTC_NCP6951_POWER_RESET
 extern int ncp6951_flt_reg_init(void);
 #endif
@@ -94,10 +92,10 @@ static int ncp6951_i2c_read(struct device *dev, u8 reg_addr, u8 *data);
 static int ncp6951_force_clock_enable(void);
 static int ncp6951_force_clock_disable(void);
 
+#ifdef CONFIG_HTC_NCP6951_POWER_RESET
 static int ncp6951_enable_power(struct ncp6951_regulator *reg, bool enable)
 {
 	int ret = 0;
-#ifdef CONFIG_HTC_NCP6951_POWER_RESET
 	if (!reg) {
 		pr_err("%s: invalid regulator\n", __func__);
 		return -1;
@@ -119,9 +117,9 @@ static int ncp6951_enable_power(struct ncp6951_regulator *reg, bool enable)
                         pr_info("[NCP6951] %s: power off\n", __func__);
                 }
         }
-#endif
 	return ret;
 }
+#endif
 
 static int ncp6951_enable(struct ncp6951_regulator *reg, bool enable)
 {
@@ -394,10 +392,6 @@ int ncp6951_reset(void)
 	int ret = 0;
 #ifdef CONFIG_HTC_NCP6951_POWER_RESET
 	u8 data = 0;
-	if (!has_load_switch) {
-		pr_err("%s: Load switch not apply, cancel power reset\n", __func__);
-		return -1;
-	}
         
         ncp6951_i2c_read(regulator->dev, regulator->ncp6951_vregs[0].enable_addr, &data);
         if (data & 0x7F) {
@@ -420,121 +414,13 @@ int ncp6951_reset(void)
 }
 EXPORT_SYMBOL(ncp6951_reset);
 
-static const int TEST_MODE_EN_MASK = 0x80;
-static const int NCP6951_FORCE_REF_ENABLE = 0x80;
-static const int NCP6951_FORCE_CLOCK_ENABLE = 0x01;
-
-static int ncp6951_enter_test_mode(void)
-{
-        u8 data = 0x0;
-
-        ncp6951_i2c_ex_read(0x1f, &data);
-
-        if (data != 0x00) {
-                pr_err("%s: Invalid state\n", __func__);
-                return -1;
-        }
-        
-        ncp6951_i2c_ex_write(0x1f, 0x69);
-        ncp6951_i2c_ex_write(0x1f, 0x51);
-        ncp6951_i2c_ex_read(0x1f, &data);
-        if (!(data & TEST_MODE_EN_MASK)) {
-                pr_err("%s: Enter test mode failed\n", __func__);
-                return -1;
-        }
-        pr_info("%s: Enter test mode\n", __func__);
-	return 0;
-}
-
-static int ncp6951_exit_test_mode(void)
-{
-	u8 data = 0;
-        
-        ncp6951_i2c_ex_write(0x1e, 0x69);
-        ncp6951_i2c_ex_write(0x1e, 0x51);
-        ncp6951_i2c_ex_read(0x1f, &data);
-        if (data != 0x00) {
-                pr_err("%s: Exit test mode failed\n", __func__);
-                return -1;
-        }
-        pr_info("%s: Exit test mode\n", __func__);
-	return 0;
-}
-
 static int ncp6951_force_clock_enable(void)
 {
-	u8 data = 0x0;
-	if (ncp6951_enter_test_mode())
-		return -1;
-
-	ncp6951_i2c_ex_write(0x24, NCP6951_FORCE_REF_ENABLE);
-	ncp6951_i2c_ex_read(0x24, &data);
-	if (data != NCP6951_FORCE_REF_ENABLE) {
-		pr_err("%s: Force enable reference failed\n", __func__);
-		return -1;
-	}
-	pr_info("%s: Force enable reference\n", __func__);
-	ncp6951_i2c_ex_write(0x20, NCP6951_FORCE_CLOCK_ENABLE);
-	ncp6951_i2c_ex_read(0x20, &data);
-	if (data != NCP6951_FORCE_CLOCK_ENABLE) {
-		pr_err("%s: Force enable clock failed\n", __func__);
-		return -1;
-	}
-	pr_info("%s: Force enable clock\n", __func__);
-	ncp6951_exit_test_mode();
 	return 0;
 }
 
 static int ncp6951_force_clock_disable(void)
 {
-        u8 data = 0x0;
-
-	if (ncp6951_enter_test_mode())
-                return -1;
-
-        ncp6951_i2c_ex_write(0x20, 0x0);
-        ncp6951_i2c_ex_read(0x20, &data);
-        if (data != 0x0) {
-                pr_err("%s: Force disable clock failed\n", __func__);
-                return -1;
-        }
-
-        pr_info("%s: Force disable clock\n", __func__);
-
-	ncp6951_i2c_ex_write(0x24, 0x0);
-        ncp6951_i2c_ex_read(0x24, &data);
-        if (data != 0x0) {
-                pr_err("%s: Force disable reference failed\n", __func__);
-                return -1;
-        }
-        pr_info("%s: Force disable reference\n", __func__);
-	ncp6951_exit_test_mode();
-	return 0;
-}
-
-static int ncp6951_check_load_switch(struct ncp6951_regulator *reg)
-{
-        struct ncp6951_vreg *vreg = &(reg->ncp6951_vregs[0]);
-        struct device *dev = vreg->dev;
-	uint8_t val = 0;
-	int rc = 0;
-
-	
-	gpio_set_value(reg->pwr_gpio, 0);
-	
-	mutex_lock(&vreg->mlock);
-	rc = ncp6951_i2c_read(dev, vreg->base_addr, &val);
-	mutex_unlock(&vreg->mlock);
-	
-	if (rc < 0)
-	
-		has_load_switch = 1;
-	else
-		has_load_switch = 0;
-	
-	gpio_set_value(reg->pwr_gpio, 1);
-        pr_info("%s: Check load switch: %s\n", __func__, (has_load_switch == 1? "Has load switch": "No load switch"));
-	mdelay(5);
 	return 0;
 }
 
@@ -744,7 +630,6 @@ static int ncp6951_probe(struct i2c_client *client, const struct i2c_device_id *
 	}
 	i2c_set_clientdata(client, reg);
 	regulator = reg;
-	ncp6951_check_load_switch(reg);
 	ncp6951_force_clock_enable();
 	ncp6951_enable(reg, true);
 	ncp6951_init(reg);

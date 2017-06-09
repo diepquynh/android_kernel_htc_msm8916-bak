@@ -36,10 +36,12 @@
 #include "rt5506.h"
 #include <linux/htc_headset_mgr.h>
 
+//htc audio ++
 #undef pr_info
 #undef pr_err
 #define pr_info(fmt, ...) pr_aud_info(fmt, ##__VA_ARGS__)
 #define pr_err(fmt, ...) pr_aud_err(fmt, ##__VA_ARGS__)
+//htc audio --
 
 #define BYPASS_MODE (0)
 
@@ -91,6 +93,7 @@ struct rt55xx_config RT5506_AMP_MUTE = {1,{{0x1,0xC7},}};;
 struct rt55xx_config RT5506_AMP_OFF = {1,{{0x0,0x1},}};
 
 static int rt5506_write_reg(u8 reg, u8 val);
+//static int rt5506_i2c_read(char *rxData, int length);
 static void hs_imp_detec_func(struct work_struct *work);
 static int rt5506_i2c_read_addr(unsigned char *rxData, unsigned char addr);
 static int rt5506_i2c_write(struct rt55xx_reg_data *txData, int length);
@@ -106,6 +109,7 @@ static int set_rt5506_regulator(enum AMP_REG_MODE mode)
 {
 	if(pdata->power_reg) {
 
+/* no need to set amp mode; always auto mode
 		switch(mode) {
 			case REG_PWM_MODE:
 				pr_info("%s:set regulator to PWM mode\n",__func__);
@@ -120,6 +124,7 @@ static int set_rt5506_regulator(enum AMP_REG_MODE mode)
 			default:
 				break;
 		}
+*/
 	}
 	return 0;
 }
@@ -157,7 +162,7 @@ static int rt5506_headset_detect(void *private_data, int on)
 		pr_info("%s: headset in --\n",__func__);
 		mutex_unlock(&rt5506_query.mlock);
 		mutex_unlock(&rt5506_query.gpiolock);
-		
+		//inited = 0;
 		queue_delayed_work(hs_wq,&rt5506_query.hs_imp_detec_work,msecs_to_jiffies(5));
 		pr_info("%s: headset in --2\n",__func__);
 
@@ -260,7 +265,7 @@ static int rt5506_write_reg(u8 reg, u8 val)
 	msg->buf = data;
 	data[0] = reg;
 	data[1] = val;
-        pr_info("%s: write reg 0x%x val 0x%x\n",__func__,data[0],data[1]); 
+        pr_info("%s: write reg 0x%x val 0x%x\n",__func__,data[0],data[1]);
 	err = i2c_transfer(this_client->adapter, msg, 1);
 	if (err >= 0)
 		return 0;
@@ -284,8 +289,8 @@ static int rt5506_i2c_write(struct rt55xx_reg_data *txData, int length)
 		},
 	};
 	for (i = 0; i < length; i++) {
-		
-		
+		//if (i == 2)  /* According to rt5506 Spec */
+		//	mdelay(1);
 		buf[0] = txData[i].addr;
 		buf[1] = txData[i].val;
 
@@ -496,7 +501,7 @@ static void hs_imp_detec_func(struct work_struct *work)
 		om = (temp[0] & 0xe) >> 1;
 
 		if(r_channel == 0) {
-			
+			//mono headset
 			hsom = HEADSET_MONO;
 		} else {
 
@@ -586,7 +591,7 @@ static void volume_ramp_func(struct work_struct *work)
 	if(rt5506_query.rt5506_status != RT55XX_PLAYBACK) {
 
 		mdelay(1);
-		
+		//start state machine and disable noise gate
 		if(high_imp)
 			rt5506_write_reg(0xb1,0x80);
 
@@ -650,7 +655,7 @@ static int set_rt5506_amp(int on, int dsp)
 		rt5506_query.action_on = 0;
 	cancel_delayed_work_sync(&rt5506_query.gpio_off_work);
 	cancel_delayed_work_sync(&rt5506_query.volume_ramp_work);
-	
+	//flush_work(&rt5506_query.volume_ramp_work.work);
 	mutex_lock(&rt5506_query.gpiolock);
 
 	if(on) {
@@ -814,7 +819,7 @@ static long rt5506_ioctl(struct file *file, unsigned int cmd,
 
 			pr_info("%s: update rt5506 i2c commands #%d success.\n",
 					__func__, rt55xx_config_data_ptr->mode_num);
-			
+			/* update default paramater from csv*/
 			update_amp_parameter(RT55XX_MODE_OFF);
 			update_amp_parameter(RT55XX_MUTE);
 			update_amp_parameter(RT55XX_INIT);
@@ -924,6 +929,33 @@ static long rt5506_ioctl(struct file *file, unsigned int cmd,
 	return rc;
 }
 
+static int regulator_power_enable(struct regulator * amp_power, unsigned volt)
+{
+	int ret = 0;
+
+	pr_info("%s, volt=%u\n", __func__, volt);
+	ret = regulator_set_voltage(amp_power, volt, volt);
+	if (ret < 0) {
+		pr_err("%s: unable to set voltage to %d rc:%d\n",
+			 __func__, volt, ret);
+		regulator_put(amp_power);
+		amp_power = NULL;
+		return -ENODEV;
+	}
+
+	ret = regulator_enable(amp_power);
+	if (ret < 0) {
+		pr_err("%s: Enable regulator failed\n", __func__);
+		regulator_put(amp_power);
+		amp_power = NULL;
+		return -ENODEV;
+	} else {
+		pr_info("%s: Enable regulator OK\n", __func__);
+	}
+
+	return 0;
+}
+
 static int rt550_parse_pfdata(struct device *dev, struct rt55xx_platform_data *ppdata)
 {
 	struct device_node *dt = dev->of_node;
@@ -952,9 +984,29 @@ static int rt550_parse_pfdata(struct device *dev, struct rt55xx_platform_data *p
 
 	pr_info("%s: rt5506 gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
 
-	if(pdata->power_supply)
+	if(pdata->power_supply) {
 		pr_info("%s:power supply %s\n",__func__,pdata->power_supply);
 
+		pdata->power_reg = regulator_get(NULL, pdata->power_supply);
+		if (!IS_ERR(pdata->power_reg)) {
+			pr_info("%s : init request headset power supply\n", __func__);
+			ret = regulator_power_enable(pdata->power_reg, 1800000);
+			if (ret) {
+				pr_err("%s : init headset power fail\n", __func__);
+				return -ENODEV;
+			}
+			pr_info("%s : init request headset power supply done\n", __func__);
+		}
+	}
+
+/*	if(pdata->power_supply != NULL) {
+		pdata->power_reg = rpm_regulator_get(NULL, pdata->power_supply);
+		if (IS_ERR(pdata->power_reg)) {
+			pdata->power_reg = NULL;
+			pr_err("%s: reqest regulator %s fail\n",__func__,pdata->power_supply);
+		}
+	}
+*/
 
 	if(gpio_is_valid(pdata->gpio_rt55xx_enable))
 		return 0;
@@ -1005,7 +1057,7 @@ int rt5506_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	this_client = client;
 
-	if(1) {
+	if(1/*pdata->gpio_rt55xx_enable*/) {
 		unsigned char temp[2];
 
 		err = gpio_request(pdata->gpio_rt55xx_enable, "hp_en_rt5506");
@@ -1038,7 +1090,7 @@ int rt5506_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		rt5506_write_reg(0x93,0x9d);
 		rt5506_write_reg(0x95,0x7b);
 		rt5506_write_reg(0xa4,0x52);
-		
+		//rt5506_write_reg(0x96,0xae);
 		rt5506_write_reg(0x97,0x00);
 		rt5506_write_reg(0x98,0x22);
 		rt5506_write_reg(0x99,0x33);
@@ -1058,10 +1110,15 @@ int rt5506_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			pr_info("rt5506 is connected\n");
 			rt5506Connect = 1;
 		}
-		rt5506Connect = 1;
 
 		gpio_set_value(pdata->gpio_rt55xx_enable, 0);
 
+		/*if(!err)
+			gpio_free(pdata->gpio_rt55xx_enable);
+
+		if(ret < 0) {
+			pr_err("%s: gpio %d off error %d\n",  __func__, pdata->gpio_rt55xx_enable, ret);
+		}*/
 	}
 
 	if(rt5506Connect) {
@@ -1081,7 +1138,7 @@ int rt5506_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		gpio_wq = create_workqueue("rt5506_gpio_off");
 		INIT_DELAYED_WORK(&rt5506_query.gpio_off_work, hs_imp_gpio_off);
 		rt5506_register_hs_notification();
-		
+		//queue_delayed_work(ramp_wq, &rt5506_query.volume_ramp_work, msecs_to_jiffies(30000));
 
 	}
 	return 0;
@@ -1212,7 +1269,8 @@ static void __exit rt5506_exit(void)
 	i2c_del_driver(&rt5506_driver);
 
 	if(pdata->power_reg) {
-		rpm_regulator_put(pdata->power_reg);
+		regulator_put(pdata->power_reg);
+		pdata->power_reg = NULL;
 	}
 
 	if(rt55xx_config_data_ptr) {

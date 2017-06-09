@@ -68,7 +68,7 @@
 			//power_vi2c = <0>;
 			//power_vdd = <0>;
 			interrupt_gpio = <&msm_gpio 20 0>;
-			threshold = <(-250) (-200) 200 250>;
+			threshold = <(-317) (-306) 167 171>;
 			sensitivity = [03];
 		};
 
@@ -86,33 +86,46 @@
 
 		lp5521@32 {
 			compatible = "LP5521-LED";
-            reg = <0x32>;
-            lp5521,lp5521_en = <&msm_gpio 77 0x00>;
-            lp5521,num_leds = <1>;
-            };
-        htc_mcu@72 {
-            compatible = "htc_mcu";
-            reg = <0x72>;
-            interrupt-parent = <&msm_gpio>;
-            interrupts = <42 0x0>;
-            mcu,intr-gpio  = <&msm_gpio 36 0>;
-            mcu,gs_chip_layout = <1>;
-            mcu,acceleration_axes = <7>;
-            mcu,magnetic_axes = <7>;
-            mcu,gyro_axes = <7>;
-            mcu,Cpu_wake_mcu-gpio = <&msm_gpio 101 0>;
-            mcu,Reset-gpio = <&msm_gpio 100 0>;
-            mcu,Chip_mode-gpio = <&msm_gpio 52 0>;
-            mcu,mcu_status-gpio = <&msm_gpio 121 0>;
-            mcu,als_levels = <23 73 110 424 1034 6499 9716 17795 24240 65535>;
-            mcu,als_goldl = <0x8F>;
-            mcu,als_goldh = <0x11>;
-            mcu,ps_thd_add = <0x32>;
-            mcu,ps_thd_fixed = <0x15>;
-            pinctrl-names = "mcu_gpio_init";
-            //pinctrl-0 = <&mcu_init>;
-            touch_enable = <1>;
-            };
+			reg = <0x32>;
+			lp5521,lp5521_en = <&msm_gpio 77 0x00>;
+			lp5521,num_leds = <1>;
+			lp5521,current_param = <10>;
+		};
+		htc_mcu@72 {
+			compatible = "htc_mcu";
+			reg = <0x72>;
+			interrupt-parent = <&msm_gpio>;
+			interrupts = <42 0x0>;
+			mcu,intr-gpio  = <&msm_gpio 36 0>;
+			mcu,gs_chip_layout = <1>;
+			mcu,acceleration_axes = <7>;
+			mcu,magnetic_axes = <7>;
+			mcu,gyro_axes = <7>;
+			mcu,Cpu_wake_mcu-gpio = <&msm_gpio 101 0>;
+			mcu,Reset-gpio = <&msm_gpio 100 0>;
+			mcu,Chip_mode-gpio = <&msm_gpio 52 0>;
+			mcu,mcu_status-gpio = <&msm_gpio 121 0>;
+			mcu,als_levels = <23 73 110 424 1034 6499 9716 17795 24240 65535>;
+			mcu,als_goldl = <0x8F>;
+			mcu,als_goldh = <0x11>;
+			mcu,als_polling = <0>;
+			mcu,ps_thd_add = <0x32>;
+			mcu,ps_thd_fixed = <0x15>;
+			pinctrl-names = "mcu_gpio_init";
+			//pinctrl-0 = <&mcu_init>;
+			touch_enable = <1>;
+			vibrate_ms = <20>;
+		};
+
+		htc_mcu_flash@39 {
+			compatible = "htc_mcu_flash";
+			reg = <0x39>;
+		};
+
+		htc_mcu_dload@02 {
+			compatible = "htc_mcu_dload";
+			reg = <0x02>;
+		};
 	};
 
         i2c@78b8000 {
@@ -197,15 +210,18 @@
 			htc,fg-voltage-empty-re-check-mv = <3200>;
 			qcom,fg-auto-recharge-soc = <97>;
 			qcom,iterm-ma = <50>;
-			htc,batt-full-criteria = <280>;
+			htc,batt-full-criteria = <440>;
 			htc,batt-eoc-criteria = <50>;
-			qcom,thermal-mitigation = <1500 700 600 0>;
+			qcom,max-fastchg-ma = <1500>;
+			qcom,clamp-soc-voltage-mv = <3400>;
 			qcom,otg-batt-curr-limit = <1500>;
+
+			qcom,thermal-mitigation = <1500 700 600 0>;
 			qcom,warm-bat-mv = <4100>;
 			qcom,warm-bat-decidegc = <48>;
 			qcom,cool-bat-decidegc = <0>;
-			qcom,clamp-soc-voltage-mv = <3400>;
-			qcom,max-fastchg-ma = <1500>;
+
+			htc,r-hw-mb-impedance = <220>;
 
 			/* smb1360 + pm8916 */
 			htc,pm8916-enabled;
@@ -216,6 +232,7 @@
 			compatible = "ti-lm3697";
 			reg = <0x6c>;
 			pwm-cfg = <0x0e>;
+			bri-cfg = <0x01>;
 			boost-ctl = <0x03>;
 			ctl-bank-en = <0x02>;
 			brt-code-table = <
@@ -294,7 +311,7 @@
 	gpio_event {
 	compatible = "key,gpio-event";
 	names = "device-keypad";
-	clr_gpio = <&msm_gpio 2 0>;
+	clr_gpio = <&msm_gpio 16 0>;
 	cmcc_disable_reset = <1>;
 
 		key0 {
@@ -327,9 +344,6 @@
 		qcom,msm-mbhc-gnd-swh = <0>;
 		qcom,msm-hs-micbias-type = "internal";
 		qcom,audio-routing =
-			/*"HP_AMP", "BE_OUT",*/
-			"HP_AMP", "HEADPHONE",
-			"EAR_AMP", "EAR",
 			"RX_BIAS", "MCLK",
 			"SPK_RX_BIAS", "MCLK",
 			"INT_LDO_H", "MCLK",
@@ -351,7 +365,6 @@
 		pinctrl-3 = <&cross_conn_det_sus>;
 		pinctrl-4 = <&cdc_pdm_lines_act &ext_cdc_tlmm_lines_act>;
 		pinctrl-5 = <&cdc_pdm_lines_sus &ext_cdc_tlmm_lines_sus>;
-		qcom,cdc-us-euro-gpios = <&msm_gpio 120 0>;
 		asoc-platform = <&pcm0>, <&pcm1>, <&voip>, <&voice>,
 				<&loopback>, <&compress>, <&hostless>,
 				<&afe>, <&lsm>, <&routing>, <&lpa>;
@@ -426,6 +439,19 @@
         ncp6924-regulator@10 {
             ncp,use-ioexpander = <0>; /* 1: en_pin at gpio-expander */
             ncp,enable-gpio = <&msm_gpio 51 0>;
+
+			ncp6924_dcdc1: regulator-dcdc1 {
+				regulator-name = "ncp6924_dcdc1";
+				regulator-min-microvolt = <600000>;
+				regulator-max-microvolt = <3300000>;
+				ncp,resource-id = <1>;
+				ncp,regulator-type = <0>;
+				ncp,enable-addr = <0x14>;
+				ncp,enable-bit = <1>;
+				ncp,mode-bit = <0>;
+				ncp,mode = <0>;
+				ncp,base-addr = <0x20>;
+			};
         };
     };
 };
@@ -447,6 +473,7 @@
 	regulator-min-microvolt = <1800000>;
 	regulator-max-microvolt = <1800000>;
 	qcom,init-voltage = <1800000>;
+	regulator-always-on; /* V_AUD_1V8 need always on as audio request */
 };
 
 &pm8916_l11 {
@@ -724,7 +751,7 @@
 	htc,vendor_id = /bits/ 16 <0x0bb4>;
 	htc,product_id = /bits/ 16 <0x0dff>;
 	htc,nluns = <1>;
-	htc,cdrom_lun = <0>;
+	htc,cdrom_lun = <1>;
 	htc,usb_rmnet_interface = "smd,bam";
 	htc,usb_diag_interface = "diag";
 	htc,fserial_init_string = "smd:modem,tty,tty:autobot,tty:serial,tty:autobot,tty:acm";

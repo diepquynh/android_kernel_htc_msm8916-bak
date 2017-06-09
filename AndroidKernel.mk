@@ -58,7 +58,11 @@ ifeq ($(TARGET_USES_UNCOMPRESSED_KERNEL),true)
 $(info Using uncompressed kernel)
 TARGET_PREBUILT_INT_KERNEL := $(KERNEL_OUT)/arch/$(KERNEL_ARCH)/boot/Image
 else
+ifeq ($(KERNEL_ARCH),arm64)
+TARGET_PREBUILT_INT_KERNEL := $(KERNEL_OUT)/arch/$(KERNEL_ARCH)/boot/Image.gz
+else
 TARGET_PREBUILT_INT_KERNEL := $(KERNEL_OUT)/arch/$(KERNEL_ARCH)/boot/zImage
+endif
 endif
 
 ifeq ($(TARGET_KERNEL_APPEND_DTB), true)
@@ -71,11 +75,14 @@ KERNEL_MODULES_INSTALL := system
 KERNEL_MODULES_OUT := $(TARGET_OUT)/lib/modules
 
 TARGET_PREBUILT_KERNEL := $(TARGET_PREBUILT_INT_KERNEL)
+$(info TARGET_PREBUILT_KERNEL is $(TARGET_PREBUILT_KERNEL))
 
+ifndef HTC_GEP_EXFAT_NOT_SUPPORT
 KERNEL_ENABLE_EXFAT ?= $(shell cat kernel/arch/$(KERNEL_ARCH)/configs/$(KERNEL_DEFCONFIG) | egrep -v "^\s*\#" | egrep "CONFIG_EXFAT_FS" | sed 's/^\s*CONFIG_EXFAT_FS\s*=\s*//' )
 KERNEL_EXFAT_PATH ?= $(shell cat kernel/arch/$(KERNEL_ARCH)/configs/$(KERNEL_DEFCONFIG) | egrep -v "^\s*\#" | egrep "CONFIG_EXFAT_PATH" | sed 's/^\s*CONFIG_EXFAT_PATH\s*=\s*\"//' | sed 's/\".*//' )
 KERNEL_EXFAT_VERSION ?= $(shell cat kernel/arch/$(KERNEL_ARCH)/configs/$(KERNEL_DEFCONFIG) | egrep -v "^\s*\#" | egrep "CONFIG_EXFAT_VERSION" | sed 's/^\s*CONFIG_EXFAT_VERSION\s*=\s*\"//' | sed 's/\".*//' )
 BUILD_PATH ?= $(shell pwd)
+endif
 
 define mv-modules
 mdpath=`find $(KERNEL_MODULES_OUT) -type f -name modules.dep`;\
@@ -113,8 +120,9 @@ ifeq ($(KERNEL_ENABLE_EXFAT), m)
 	cp -rf vendor/tuxera/exfat/texfat kernel/fs/
 	cp -rf vendor/tuxera/exfat/$(KERNEL_EXFAT_PATH) kernel/fs/
 	mkdir -p $(KERNEL_OUT)/fs/$(KERNEL_EXFAT_PATH)
-	# Update exFAT module after vmlinux but before modules
-	$(MAKE) -C kernel O=../$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) CROSS_COMPILE=$(KERNEL_CROSS_COMPILE) PRIVATE_RCMS_NAME=$(PRIVATE_RCMS_NAME) PRIVATE_SKU_NAME=$(PRIVATE_SKU_NAME) vmlinux
+endif
+	$(MAKE) -C kernel O=../$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) CROSS_COMPILE=$(KERNEL_CROSS_COMPILE) PRIVATE_RCMS_NAME=$(PRIVATE_RCMS_NAME) PRIVATE_SKU_NAME=$(PRIVATE_SKU_NAME) $(KERNEL_CFLAGS)
+ifeq ($(KERNEL_ENABLE_EXFAT), m)
 ifeq ($(HTC_DEBUG_FLAG), DEBUG)
 ifeq ($(strip $(KERNEL_EXFAT_VERSION)),)
 	./kernel/update_tuxera.sh -p $(KERNEL_EXFAT_PATH) -t target/htc.d/htc -o $(KERNEL_OUT)
@@ -140,7 +148,6 @@ endif
 
 endif
 endif
-	$(MAKE) -C kernel O=../$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) CROSS_COMPILE=$(KERNEL_CROSS_COMPILE) PRIVATE_RCMS_NAME=$(PRIVATE_RCMS_NAME) PRIVATE_SKU_NAME=$(PRIVATE_SKU_NAME) $(KERNEL_CFLAGS)
 	$(MAKE) -C kernel O=../$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) CROSS_COMPILE=$(KERNEL_CROSS_COMPILE) PRIVATE_RCMS_NAME=$(PRIVATE_RCMS_NAME) PRIVATE_SKU_NAME=$(PRIVATE_SKU_NAME) $(KERNEL_CFLAGS) modules
 	$(MAKE) -C kernel O=../$(KERNEL_OUT) INSTALL_MOD_PATH=../../$(KERNEL_MODULES_INSTALL) INSTALL_MOD_STRIP=1 ARCH=$(KERNEL_ARCH) CROSS_COMPILE=$(KERNEL_CROSS_COMPILE) PRIVATE_RCMS_NAME=$(PRIVATE_RCMS_NAME) PRIVATE_SKU_NAME=$(PRIVATE_SKU_NAME) modules_install
 
@@ -180,9 +187,10 @@ ifeq ($(KERNEL_ENABLE_EXFAT), m)
 	rm -rf kernel/fs/texfat*
 endif
 
-
+ifndef ECRYPTFS_MODULE_FOR_GEP
 	$(info start build keydar_build_kernel_modules.sh)
 	vendor/mocana/scripts/keydar_build_kernel_modules.sh -v -M -c $(KERNEL_CROSS_COMPILE) -s `pwd`/vendor/mocana/src/mss -k 3.10 -K `pwd`/$(KERNEL_OUT) -e `pwd`/vendor/mocana/src/ecryptfs-mocana -a `pwd`/vendor/mocana/src/crypto-api-template -D `pwd`/$(KERNEL_MODULES_OUT)
+endif
 
 ifeq ($(MOCANA_FIPS_MODULE), true)
 	$(info start build keydar_build_kernel_modules.sh)

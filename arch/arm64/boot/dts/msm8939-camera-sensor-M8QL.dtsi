@@ -47,8 +47,11 @@
 		ISP_1v2-supply = <&ncp6924_dcdc2>;
 		ISP_A2v8-supply = <&ncp6924_ldo1>;
 		pinctrl-names = "AIT_default", "AIT_suspend";
-		pinctrl-0 = <&cam_sensor_mclk1_default>;
-		pinctrl-1 = <&cam_sensor_mclk1_sleep>;
+		pinctrl-0 = <&cam_sensor_mclk1_default &cam_sensor_front_default>;
+		pinctrl-1 = <&cam_sensor_mclk1_sleep &cam_sensor_front_sleep>;
+		interrupt-parent = <&msm_gpio>;
+		interrupts = <102 0x4>;
+		interrupt-names = "AIT_intr";
 	};
 
 };
@@ -78,12 +81,13 @@
 		cam_vio-supply = <&ncp6924_ldo4>;
 		cam_vana-supply = <&msm_gpio 92 0>;
 		cam_vaf-supply = <&ncp6924_ldo2>;
-		qcom,cam-vreg-name = "cam_vdig", "cam_vio", "cam_vana", "cam_vaf";
-		qcom,cam-vreg-type = <2 0 2 0>;
-		qcom,cam-vreg-min-voltage = <0 1800000 0 2800000>;
-		qcom,cam-vreg-max-voltage = <0 1800000 0 2800000>;
-		qcom,cam-vreg-op-mode = <0 0 0 0>;
-		qcom,cam-vreg-gpios-index = <99 99 99 99>;
+		cam_vcustom1-supply = <&ncp6924_dcdc2>;//V_ISP_1V2
+		qcom,cam-vreg-name = "cam_vdig", "cam_vio", "cam_vana", "cam_vaf", "cam_vcustom1";
+		qcom,cam-vreg-type = <2 0 2 0 0>;
+		qcom,cam-vreg-min-voltage = <0 1800000 0 2800000 1200000>;
+		qcom,cam-vreg-max-voltage = <0 1800000 0 2800000 1200000>;
+		qcom,cam-vreg-op-mode = <0 0 0 0 0>;
+		qcom,cam-vreg-gpios-index = <99 99 99 99 99>;
 		qcom,gpio-no-mux = <0>;
 		pinctrl-names = "cam_default", "cam_suspend";
 		pinctrl-0 = <&cam_sensor_mclk0_default
@@ -141,9 +145,8 @@
 		qcom,cam-vreg-gpios-index = <99 99 99>;
 		qcom,gpio-no-mux = <0>;
 		pinctrl-names = "cam_default", "cam_suspend";
-		pinctrl-0 = <&cam_sensor_mclk1_default
-				&cam_sensor_front_default>;
-		pinctrl-1 = <&cam_sensor_mclk1_sleep &cam_sensor_front_sleep>;
+		pinctrl-0 = <&cam_sensor_mclk1_default>;
+		pinctrl-1 = <&cam_sensor_mclk1_sleep>;
 		gpios = <&msm_gpio 27 0>,
 				<&msm_gpio 28 0>,
 				<&pm8916_gpios 2 0>;
@@ -186,9 +189,9 @@
 		qcom,cam-vreg-op-mode = <0 0 0>;
 		qcom,cam-vreg-gpios-index = <99 99 99>;
 		qcom,gpio-no-mux = <0>;
-		pinctrl-names = "cam_default", "cam_suspend";
-		pinctrl-0 = <&cam_sensor_front_default>;
-		pinctrl-1 = <&cam_sensor_front_sleep>;
+		//pinctrl-names = "cam_default", "cam_suspend";
+		//pinctrl-0 = <&cam_sensor_front_default>;
+		//pinctrl-1 = <&cam_sensor_front_sleep>;
 		gpios = <&msm_gpio 95 0>;
 		qcom,gpio-vana = <0>;
 		qcom,gpio-req-tbl-num = <0>;
@@ -226,9 +229,9 @@
 		qcom,cam-vreg-op-mode = <0 0 0>;
 		qcom,cam-vreg-gpios-index = <99 99 99>;
 		qcom,gpio-no-mux = <0>;
-		pinctrl-names = "cam_default", "cam_suspend";
-		pinctrl-0 = <&cam_sensor_front_default>;
-		pinctrl-1 = <&cam_sensor_front_sleep>;
+		//pinctrl-names = "cam_default", "cam_suspend";
+		//pinctrl-0 = <&cam_sensor_front_default>;
+		//pinctrl-1 = <&cam_sensor_front_sleep>;
 		gpios = <&msm_gpio 95 0>;
 		qcom,gpio-vana = <0>;
 		qcom,gpio-req-tbl-num = <0>;

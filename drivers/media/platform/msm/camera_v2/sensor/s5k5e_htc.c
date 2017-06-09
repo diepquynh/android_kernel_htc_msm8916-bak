@@ -18,6 +18,13 @@ DEFINE_MSM_MUTEX(s5k5e_mut);
 
 static struct msm_sensor_ctrl_t s5k5e_s_ctrl;
 
+#ifdef CONFIG_CAMERA_AIT
+extern int match_front_sensor_ID;
+extern uint16_t front_fusedid[4];
+extern uint16_t front_fuse_id[4];
+#endif
+
+/*HTC_START*/
 struct msm_camera_GPIO_info{
     int CAM_SEL;
     int CAM_SEL2;
@@ -27,11 +34,12 @@ struct msm_camera_GPIO_info{
 };
 
 static struct msm_camera_GPIO_info *GPIO_ctrl = NULL;
+/*HTC_END*/
 
 struct msm_sensor_power_setting s5k5e_power_setting[] = {
 	{
 		.seq_type = SENSOR_VREG,
-		.seq_val = CAM_VDIG,
+		.seq_val = CAM_VDIG,//V_ISP_1V2
 		.config_val = 1,
 		.delay = 1,
 	},
@@ -55,14 +63,14 @@ struct msm_sensor_power_setting s5k5e_power_setting[] = {
 	},
 	{
 		.seq_type = SENSOR_VREG,
-		.seq_val = CAM_VANA,
+		.seq_val = CAM_VANA,//V_ISP_A2V8
 		.config_val = 1,
 		.delay = 1,
 	},
 	{
 		.seq_type = SENSOR_GPIO,
 		.seq_val = SENSOR_GPIO_RESET,
-		.config_val = GPIO_OUT_HIGH,
+		.config_val = GPIO_OUT_HIGH,//GPIO_OUT_LOW
 		.delay = 1,
 	},
 	{
@@ -73,6 +81,8 @@ struct msm_sensor_power_setting s5k5e_power_setting[] = {
 	},
 };
 
+//For power down sequence, keep reset pin low before Analog power off.
+//For better code maintainability (copy data variable), keep the same array size with s5k5e_power_setting
 struct msm_sensor_power_setting s5k5e_power_down_setting[] = {
 	{
 		.seq_type = SENSOR_I2C_MUX,
@@ -83,12 +93,12 @@ struct msm_sensor_power_setting s5k5e_power_down_setting[] = {
 	{
 		.seq_type = SENSOR_GPIO,
 		.seq_val = SENSOR_GPIO_RESET,
-		.config_val = GPIO_OUT_LOW,
+		.config_val = GPIO_OUT_LOW,//GPIO_OUT_HIGH,
 		.delay = 1,
 	},
 	{
 		.seq_type = SENSOR_VREG,
-		.seq_val = CAM_VANA,
+		.seq_val = CAM_VANA,//V_ISP_A2V8
 		.config_val = 0,
 		.delay = 1,
 	},
@@ -112,7 +122,7 @@ struct msm_sensor_power_setting s5k5e_power_down_setting[] = {
 	},
 	{
 		.seq_type = SENSOR_VREG,
-		.seq_val = CAM_VDIG,
+		.seq_val = CAM_VDIG,//V_ISP_1V2
 		.config_val = 0,
 		.delay = 1,
 	},
@@ -213,7 +223,7 @@ static int32_t s5k5e_platform_probe(struct platform_device *pdev)
 
 	match = of_match_device(s5k5e_dt_match, &pdev->dev);
 
-    
+    /*HTC_START*/
     GPIO_ctrl = kzalloc(sizeof(struct msm_camera_GPIO_info), GFP_ATOMIC);
     if (!GPIO_ctrl) {
 		pr_err("%s: could not allocate mem for GPIO_ctrl\n", __func__);
@@ -245,14 +255,14 @@ static int32_t s5k5e_platform_probe(struct platform_device *pdev)
 	if ( GPIO_ctrl->V_SR_3V < 0) {
 		pr_err("%s:%d V_SR_3V rc %d\n", __func__, __LINE__, GPIO_ctrl->V_SR_3V);
 	}
-    
+    /*HTC_END*/
 
-	
+	/* HTC_START , add to fix Klocwork issue */
 	if (match == NULL) {
 		pr_err("%s: match is NULL\n", __func__);
 		return -ENODEV;
 	}
-	
+	/* HTC_END */
 
 	rc = msm_sensor_platform_probe(pdev, match->data);
 	return rc;
@@ -290,8 +300,8 @@ int32_t s5k5e_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
     int rc = 0;
 
     pr_info("%s: +\n", __func__);
-    
-    
+    /*HTC_START*/
+    //Turn on CAM_SEL
     rc = gpio_request_one(GPIO_ctrl->CAM_SEL, 0, "CAM_SEL");
     if (rc < 0) {
 		pr_err("GPIO(%d) request failed", GPIO_ctrl->CAM_SEL);
@@ -304,7 +314,7 @@ int32_t s5k5e_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
     else
         pr_err("GPIO(%d) GPIO_ctrl->CAM_SEL failed\n", GPIO_ctrl->CAM_SEL);
 
-    
+    //Turn on CAM_SEL2
     rc = gpio_request_one(GPIO_ctrl->CAM_SEL2, 0, "CAM_SEL2");
     if (rc < 0) {
 		pr_err("GPIO(%d) request failed", GPIO_ctrl->CAM_SEL2);
@@ -317,7 +327,7 @@ int32_t s5k5e_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
     else
         pr_err("GPIO(%d) GPIO_ctrl->CAM_SEL2 failed\n", GPIO_ctrl->CAM_SEL2);
 
-    
+    //Turn on ISP9882_EN
     rc = gpio_request_one(GPIO_ctrl->ISP9882_EN, 0, "ISP9882_EN");
     if (rc < 0) {
 		pr_err("GPIO(%d) request failed", GPIO_ctrl->ISP9882_EN);
@@ -330,7 +340,7 @@ int32_t s5k5e_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
     else
         pr_err("GPIO(%d) GPIO_ctrl->ISP9882_EN failed\n", GPIO_ctrl->ISP9882_EN);
 
-    
+    //Turn on ISP_MCLK_SEL
     rc = gpio_request_one(GPIO_ctrl->ISP_MCLK_SEL, 0, "ISP_MCLK_SEL");
     if (rc < 0) {
 		pr_err("GPIO(%d) request failed", GPIO_ctrl->ISP_MCLK_SEL);
@@ -343,7 +353,7 @@ int32_t s5k5e_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
     else
         pr_err("GPIO(%d) GPIO_ctrl->ISP_MCLK_SEL failed\n", GPIO_ctrl->ISP_MCLK_SEL);
 
-    
+    //Turn on V_SR_3V
     rc = gpio_request_one(GPIO_ctrl->V_SR_3V, 0, "V_SR_3V");
     if (rc < 0) {
 		pr_err("GPIO(%d) request failed", GPIO_ctrl->V_SR_3V);
@@ -355,7 +365,7 @@ int32_t s5k5e_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
     }
     else
         pr_err("GPIO(%d) GPIO_ctrl->V_SR_3V failed\n", GPIO_ctrl->V_SR_3V);
-    
+    /*HTC_END*/
 
     s_ctrl->power_setting_array.power_setting = s5k5e_power_setting;
     s_ctrl->power_setting_array.size = ARRAY_SIZE(s5k5e_power_setting);
@@ -364,6 +374,7 @@ int32_t s5k5e_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
     return status;
 }
 
+//For power down sequence, keep reset pin low before Analog power off.
 int32_t s5k5e_sensor_power_down(struct msm_sensor_ctrl_t *s_ctrl)
 {
     int32_t status;
@@ -374,7 +385,7 @@ int32_t s5k5e_sensor_power_down(struct msm_sensor_ctrl_t *s_ctrl)
     s_ctrl->power_setting_array.power_setting = s5k5e_power_down_setting;
     s_ctrl->power_setting_array.size = ARRAY_SIZE(s5k5e_power_down_setting);
 
-    
+    //When release regulator, need the same data pointer from power up sequence.
     for(i = 0; i < s_ctrl->power_setting_array.size;  i++)
     {
         data_size = sizeof(s5k5e_power_setting[i].data)/sizeof(void *);
@@ -385,7 +396,7 @@ int32_t s5k5e_sensor_power_down(struct msm_sensor_ctrl_t *s_ctrl)
     pr_info("%s: -\n", __func__);
     return status;
 }
-#if 0
+#if 1
 
 static int s5k5e_read_fuseid(struct sensorb_cfg_data *cdata,
 	struct msm_sensor_ctrl_t *s_ctrl)
@@ -432,7 +443,7 @@ static int s5k5e_read_fuseid(struct sensorb_cfg_data *cdata,
 	rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_write(s_ctrl->sensor_i2c_client, 0x0A00, 0x00, MSM_CAMERA_I2C_BYTE_DATA);
 	if (rc < 0)
 		pr_err("%s: i2c_write failed\n", __func__);
-
+	if (cdata != NULL) {
 	cdata->cfg.fuse.fuse_id_word1 = 0;
 	cdata->cfg.fuse.fuse_id_word2 = id_data[3];
 	cdata->cfg.fuse.fuse_id_word3 = id_data[4];
@@ -445,6 +456,24 @@ static int s5k5e_read_fuseid(struct sensorb_cfg_data *cdata,
 		cdata->cfg.fuse.fuse_id_word2,
 		cdata->cfg.fuse.fuse_id_word3,
 		cdata->cfg.fuse.fuse_id_word4);
+	}
+	else
+	{
+		pr_info("s5k5e: first fuse->fuse_id : 0x0 0x%x 0x%x 0x%x\n",
+		id_data[3],
+		id_data[4],
+		id_data[5]);
+#ifdef CONFIG_CAMERA_AIT
+		front_fusedid[0] = 0;
+		front_fusedid[1] = id_data[3];
+		front_fusedid[2] = id_data[4];
+		front_fusedid[3] = id_data[5];
+		front_fuse_id[0] = 0;
+		front_fuse_id[1] = id_data[3];
+		front_fuse_id[2] = id_data[4];
+		front_fuse_id[3] = id_data[5];
+#endif
+	}
 	pr_info("%s: OTP Module vendor = 0x%x\n", __func__,id_data[0]);
 	pr_info("%s: OTP LENS = 0x%x\n",          __func__,id_data[1]);
 	pr_info("%s: OTP Sensor Version = 0x%x\n",__func__,id_data[2]);
@@ -499,6 +528,7 @@ static int s5k5e_read_fuseid32(struct sensorb_cfg_data32 *cdata,
 	if (rc < 0)
 		pr_err("%s: i2c_write failed\n", __func__);
 
+	if (cdata != NULL) {
 	cdata->cfg.fuse.fuse_id_word1 = 0;
 	cdata->cfg.fuse.fuse_id_word2 = id_data[3];
 	cdata->cfg.fuse.fuse_id_word3 = id_data[4];
@@ -511,6 +541,24 @@ static int s5k5e_read_fuseid32(struct sensorb_cfg_data32 *cdata,
 		cdata->cfg.fuse.fuse_id_word2,
 		cdata->cfg.fuse.fuse_id_word3,
 		cdata->cfg.fuse.fuse_id_word4);
+	}
+	else
+	{
+		pr_info("s5k5e: first fuse->fuse_id : 0x0 0x%x 0x%x 0x%x\n",
+		id_data[3],
+		id_data[4],
+		id_data[5]);
+#ifdef CONFIG_CAMERA_AIT
+		front_fusedid[0] = 0;
+		front_fusedid[1] = id_data[3];
+		front_fusedid[2] = id_data[4];
+		front_fusedid[3] = id_data[5];
+		front_fuse_id[0] = 0;
+		front_fuse_id[1] = id_data[3];
+		front_fuse_id[2] = id_data[4];
+		front_fuse_id[3] = id_data[5];
+#endif
+	}
 	pr_info("%s: OTP Module vendor = 0x%x\n", __func__,id_data[0]);
 	pr_info("%s: OTP LENS = 0x%x\n",          __func__,id_data[1]);
 	pr_info("%s: OTP Sensor Version = 0x%x\n",__func__,id_data[2]);
@@ -519,14 +567,49 @@ static int s5k5e_read_fuseid32(struct sensorb_cfg_data32 *cdata,
 }
 #endif
 
+//HTC_START , move read OTP to sensor probe
+int32_t s5k5e_htc_sensor_match_id(struct msm_sensor_ctrl_t *s_ctrl)
+{
+	int32_t rc = 0;
+	int32_t rc1 = 0;
+	static int first = 0;
+	rc = msm_sensor_match_id(s_ctrl);
+	if(rc == 0) {
+		if(first == 0) {
+			pr_info("%s read_fuseid\n",__func__);
+			#ifdef CONFIG_COMPAT
+			rc1 = s5k5e_read_fuseid32(NULL, s_ctrl);
+			#else
+			rc1 = s5k5e_read_fuseid(NULL, s_ctrl);
+			#endif
+		}
+	}
+	#ifdef CONFIG_CAMERA_AIT
+	if(first == 0)
+	{
+	    if(rc == 0)
+	        match_front_sensor_ID = 1;
+	    else
+	        match_front_sensor_ID = 0;
+	    pr_info("[CAM] %s match_front_sensor_ID=%d\n",__func__, match_front_sensor_ID);
+	    pr_info("[CAM] For s5k5e_yuv s5k5e: fuse->fuse_id : 0x0 0x%x 0x%x 0x%x\n",
+		front_fusedid[1],
+		front_fusedid[2],
+		front_fusedid[3]);
+	}
+	#endif
+	first = 1;
+	return rc;
+}
+//HTC_END
 static struct msm_sensor_fn_t s5k5e_sensor_func_tbl = {
 	.sensor_config = msm_sensor_config,
 	.sensor_config32 = msm_sensor_config32,
 	.sensor_power_up = s5k5e_sensor_power_up,
 	.sensor_power_down = msm_sensor_power_down,
-	.sensor_match_id = msm_sensor_match_id,
-	
-	
+	.sensor_match_id = s5k5e_htc_sensor_match_id,//msm_sensor_match_id,
+	.sensor_i2c_read_fuseid = s5k5e_read_fuseid,
+	.sensor_i2c_read_fuseid32 = s5k5e_read_fuseid32,
 };
 
 static struct msm_sensor_ctrl_t s5k5e_s_ctrl = {

@@ -29,10 +29,9 @@
 #include <trace/events/power.h>
 
 #include "power.h"
-
-static struct delayed_work suspend_monitor_debug_work;
-static int suspend_monitor_debug_count = 0;
-static int suspend_monitor_debug_init = 0;
+#ifdef CONFIG_SUSPEND_ONLY_ALLOW_WFI
+#include <linux/pm_qos.h>
+#endif
 
 const char *const pm_states[PM_SUSPEND_MAX] = {
 	[PM_SUSPEND_FREEZE]	= "freeze",
@@ -67,6 +66,10 @@ void freeze_wake(void)
 }
 EXPORT_SYMBOL_GPL(freeze_wake);
 
+/**
+ * suspend_set_ops - Set the global suspend method table.
+ * @ops: Suspend operations to use.
+ */
 void suspend_set_ops(const struct platform_suspend_ops *ops)
 {
 	lock_system_sleep();
@@ -91,9 +94,21 @@ bool valid_state(suspend_state_t state)
 #endif
 			return true;
 	}
+	/*
+	 * PM_SUSPEND_STANDBY and PM_SUSPEND_MEMORY states need lowlevel
+	 * support and need to be valid to the lowlevel
+	 * implementation, no valid callback implies that none are valid.
+	 */
 	return suspend_ops && suspend_ops->valid && suspend_ops->valid(state);
 }
 
+/**
+ * suspend_valid_only_mem - Generic memory-only valid callback.
+ *
+ * Platform drivers that implement mem suspend only and only need to check for
+ * that in their .valid() callback can use this instead of rolling their own
+ * .valid() callback.
+ */
 int suspend_valid_only_mem(suspend_state_t state)
 {
 	return state == PM_SUSPEND_MEM;
@@ -108,42 +123,27 @@ static int suspend_test(int level)
 		mdelay(5000);
 		return 1;
 	}
-#endif 
+#endif /* !CONFIG_PM_DEBUG */
 	return 0;
 }
 
-static void suspend_monitor_debug(struct work_struct *work)
-{
-	show_state_filter(TASK_UNINTERRUPTIBLE);
-	printk("suspend prepare monitor count = %d\n", suspend_monitor_debug_count);
-	if (suspend_monitor_debug_count > 5) {
-		BUG_ON(1);
-	} else {
-		suspend_monitor_debug_count++;
-		schedule_delayed_work(&suspend_monitor_debug_work, msecs_to_jiffies(5000));
-	}
-}
-
+/**
+ * suspend_prepare - Prepare for entering system sleep state.
+ *
+ * Common code run for every system sleep state that can be entered (except for
+ * hibernation).  Run suspend notifiers, allocate the "suspend" console and
+ * freeze processes.
+ */
 static int suspend_prepare(suspend_state_t state)
 {
 	int error;
 
-	if (suspend_monitor_debug_init == 0) {
-		INIT_DELAYED_WORK(&suspend_monitor_debug_work, suspend_monitor_debug);
-		suspend_monitor_debug_init++;
-	}
-
 	if (need_suspend_ops(state) && (!suspend_ops || !suspend_ops->enter))
 		return -EPERM;
 
-	printk("Start to monitor suspend prepare time\n");
-	schedule_delayed_work(&suspend_monitor_debug_work, msecs_to_jiffies(5000));
 	pm_prepare_console();
 
 	error = pm_notifier_call_chain(PM_SUSPEND_PREPARE);
-	cancel_delayed_work_sync(&suspend_monitor_debug_work);
-	suspend_monitor_debug_count = 0;
-
 	if (error)
 		goto Finish;
 
@@ -159,16 +159,25 @@ static int suspend_prepare(suspend_state_t state)
 	return error;
 }
 
+/* default implementation */
 void __attribute__ ((weak)) arch_suspend_disable_irqs(void)
 {
 	local_irq_disable();
 }
 
+/* default implementation */
 void __attribute__ ((weak)) arch_suspend_enable_irqs(void)
 {
 	local_irq_enable();
 }
 
+/**
+ * suspend_enter - Make the system enter the given sleep state.
+ * @state: System sleep state to enter.
+ * @wakeup: Returns information that the sleep state should not be re-entered.
+ *
+ * This function should be called after devices have been suspended.
+ */
 static int suspend_enter(suspend_state_t state, bool *wakeup)
 {
 	int error;
@@ -194,6 +203,12 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	if (suspend_test(TEST_PLATFORM))
 		goto Platform_wake;
 
+	/*
+	 * PM_SUSPEND_FREEZE equals
+	 * frozen processes + suspended devices + idle processors.
+	 * Thus we should invoke freeze_enter() soon after
+	 * all the devices are suspended.
+	 */
 	if (state == PM_SUSPEND_FREEZE) {
 		freeze_enter();
 		goto Platform_wake;
@@ -235,6 +250,14 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	return error;
 }
 
+#ifdef CONFIG_SUSPEND_ONLY_ALLOW_WFI
+static struct pm_qos_request suspend_pm_qos_req;
+#endif
+
+/**
+ * suspend_devices_and_enter - Suspend devices and enter system sleep state.
+ * @state: System sleep state to enter.
+ */
 int suspend_devices_and_enter(suspend_state_t state)
 {
 	int error;
@@ -244,12 +267,20 @@ int suspend_devices_and_enter(suspend_state_t state)
 		return -ENOSYS;
 
 	trace_machine_suspend(state);
+
+#ifdef CONFIG_SUSPEND_ONLY_ALLOW_WFI
+	printk("PM: only allow wfi\n");
+	pm_qos_add_request(&suspend_pm_qos_req, PM_QOS_CPU_DMA_LATENCY, PM_QOS_DEFAULT_VALUE);
+	pm_qos_update_request(&suspend_pm_qos_req, 2);
+#endif
+
 	if (need_suspend_ops(state) && suspend_ops->begin) {
 		error = suspend_ops->begin(state);
 		if (error)
 			goto Close;
 	}
-	suspend_console();
+	if (!suspend_console_deferred)
+		suspend_console();
 	ftrace_stop();
 	suspend_test_start();
 	error = dpm_suspend_start(PMSG_SUSPEND);
@@ -271,10 +302,17 @@ int suspend_devices_and_enter(suspend_state_t state)
 	dpm_resume_end(PMSG_RESUME);
 	suspend_test_finish("resume devices");
 	ftrace_start();
-	resume_console();
+	if (!suspend_console_deferred)
+		resume_console();
  Close:
 	if (need_suspend_ops(state) && suspend_ops->end)
 		suspend_ops->end();
+
+#ifdef CONFIG_SUSPEND_ONLY_ALLOW_WFI
+	pm_qos_update_request(&suspend_pm_qos_req, PM_QOS_DEFAULT_VALUE);
+	pm_qos_remove_request(&suspend_pm_qos_req);
+#endif
+
 	trace_machine_suspend(PWR_EVENT_EXIT);
 	return error;
 
@@ -284,6 +322,12 @@ int suspend_devices_and_enter(suspend_state_t state)
 	goto Resume_devices;
 }
 
+/**
+ * suspend_finish - Clean up before finishing the suspend sequence.
+ *
+ * Call platform code to clean up, restart processes, and free the console that
+ * we've allocated. This routine is not called for hibernation.
+ */
 static void suspend_finish(void)
 {
 	suspend_thaw_processes();
@@ -291,6 +335,14 @@ static void suspend_finish(void)
 	pm_restore_console();
 }
 
+/**
+ * enter_state - Do common work needed to enter system sleep state.
+ * @state: System sleep state to enter.
+ *
+ * Make sure that no one else is trying to put the system into a sleep state.
+ * Fail if that's not the case.  Otherwise, prepare for system suspend, make the
+ * system enter the given sleep state and clean up after wakeup.
+ */
 static int enter_state(suspend_state_t state)
 {
 	int error;
@@ -338,6 +390,13 @@ static void pm_suspend_marker(char *annotation)
 		tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec);
 }
 
+/**
+ * pm_suspend - Externally visible function for suspending the system.
+ * @state: System sleep state to enter.
+ *
+ * Check if the value of @state represents one of the supported states,
+ * execute enter_state() and update system suspend statistics.
+ */
 int pm_suspend(suspend_state_t state)
 {
 	int error;

@@ -11,9 +11,11 @@
  *
  */
 #include "msm_sensor.h"
+/*HTC_START*/
 #ifdef CONFIG_CAMERA_AIT
 #include "AIT.h"
 #endif
+/*HTC_END*/
 #define OV2722_SENSOR_NAME "ov2722_yuv"
 #define PLATFORM_DRIVER_NAME "msm_camera_ov2722_yuv"
 #define ov2722_obj ov2722_yuv_##obj
@@ -30,9 +32,11 @@
 DEFINE_MSM_MUTEX(ov2722_mut);
 
 
+/*********************for image adjust********************/
 #define SENSOR_SUCCESS 0
 static struct msm_camera_i2c_client ov2722_sensor_i2c_client;
 
+/********************************************************/
 
 
 static struct msm_sensor_ctrl_t ov2722_s_ctrl;
@@ -104,12 +108,12 @@ static int32_t ov2722_platform_probe(struct platform_device *pdev)
 	int32_t rc = 0;
 	const struct of_device_id *match;
 	match = of_match_device(ov2722_dt_match, &pdev->dev);
-	
+	/* HTC_START */
 	if (!match) {
 		pr_err("%s:%d match is NULL\n", __func__, __LINE__);
 		return -EINVAL;
 	}
-	
+	/* HTC_END */
 	rc = msm_sensor_platform_probe(pdev, match->data);
 	return rc;
 }
@@ -126,7 +130,7 @@ static struct platform_driver ov2722_platform_driver = {
 
 static const char *ov2722Vendor = "OmniVision";
 static const char *ov2722NAME = "ov2722_yuv";
-static const char *ov2722Size = "2M";
+static const char *ov2722Size = "2M - subcam";
 
 static ssize_t sensor_vendor_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -147,7 +151,7 @@ static int ov2722_sysfs_init(void)
 {
 	int ret ;
 	pr_info("ov2722:kobject creat and add\n");
-	android_ov2722 = kobject_create_and_add("android_camera1", NULL);
+	android_ov2722 = kobject_create_and_add("android_camera3", NULL);
 	if (android_ov2722 == NULL) {
 		pr_info("ov2722_sysfs_init: subsystem_register " \
 		"failed\n");
@@ -197,8 +201,8 @@ int32_t ov2722_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 	long rc = 0;
 	int32_t i = 0;
 	mutex_lock(s_ctrl->msm_sensor_mutex);
-	
-	
+	//CDBG("%s:%d %s cfgtype = %d\n", __func__, __LINE__,
+	//	s_ctrl->sensordata->sensor_name, cdata->cfgtype);
 	switch (cdata->cfgtype) {
 	case CFG_GET_SENSOR_INFO:
 		memcpy(cdata->cfg.sensor_info.sensor_name,
@@ -325,16 +329,29 @@ int32_t ov2722_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 	}
 
 	case CFG_POWER_UP:
+		if (s_ctrl->sensor_state != MSM_SENSOR_POWER_DOWN) {
+			pr_err("%s:%d failed: invalid state %d\n", __func__,
+				__LINE__, s_ctrl->sensor_state);
+			rc = -EFAULT;
+			break;
+		}
 		#ifdef CONFIG_CAMERA_AIT
-		rc = AIT_ISP_open_init(CAMERA_INDEX_SUB_OV2722); 
+		rc = AIT_ISP_open_init(CAMERA_INDEX_SUB_OV2722); //sub cam
 		#endif
 		if (s_ctrl->func_tbl->sensor_power_up)
 			rc = s_ctrl->func_tbl->sensor_power_up(s_ctrl);
 		else
 			rc = -EFAULT;
+		s_ctrl->sensor_state = MSM_SENSOR_POWER_UP;
 		break;
 
 	case CFG_POWER_DOWN:
+		if (s_ctrl->sensor_state != MSM_SENSOR_POWER_UP) {
+			pr_err("%s:%d failed: invalid state %d\n", __func__,
+				__LINE__, s_ctrl->sensor_state);
+			rc = -EFAULT;
+			break;
+		}
 		if (s_ctrl->func_tbl->sensor_power_down)
 			rc = s_ctrl->func_tbl->sensor_power_down(
 				s_ctrl);
@@ -344,6 +361,7 @@ int32_t ov2722_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 		#ifdef CONFIG_CAMERA_AIT
 			AIT_ISP_release();
 		#endif
+		s_ctrl->sensor_state = MSM_SENSOR_POWER_DOWN;
 		break;
 
 	case CFG_SET_STOP_STREAM_SETTING: {
@@ -398,11 +416,46 @@ int32_t ov2722_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 	case CFG_SET_ANTIBANDING: {
 		    break;
 	}
+	case CFG_SET_ISP_CALIBRATION: {
+		int32_t mode = 0;
+		mode = cdata->ISP_calibration_mode;
+		CDBG("%s:%d %s cfgtype = %d, CFG_SET_ISP_CALIBRATION:mode:%d \n", __func__, __LINE__,
+		s_ctrl->sensordata->sensor_name, cdata->cfgtype, mode);
+		if(mode == ISP_CALIBRATION_AUTO)
+		{
+		AIT_ISP_enable_calibration(0, NULL, NULL, 0);
+		}
+		else if(mode == ISP_CALIBRATION_MANUAL)
+		{
+			struct ISP_roi_local AE_roi;
+			struct ISP_roi_local AWB_roi;
+			uint16_t GainBase;
+			uint32_t ExposureTimeBase;
+			AE_roi.width = cdata->AE_roi.width;
+			AE_roi.height = cdata->AE_roi.height;
+			AE_roi.offsetx = cdata->AE_roi.offsetx;
+			AE_roi.offsety = cdata->AE_roi.offsety;
+			AWB_roi.width = cdata->AWB_roi.width;
+			AWB_roi.height = cdata->AWB_roi.height;
+			AWB_roi.offsetx = cdata->AWB_roi.offsetx;
+			AWB_roi.offsety = cdata->AWB_roi.offsety;			
+			AIT_ISP_enable_calibration(1, &AE_roi, &AWB_roi, cdata->luma_target);
+			AIT_ISP_Get_AE_calibration(&(cdata->isp_aec.Gain), &(GainBase), &(cdata->isp_aec.N_parameter), &(ExposureTimeBase), &(cdata->isp_aec.Luma_Value));
+			AIT_ISP_Get_AWB_calibration(&(cdata->isp_awb.R_Sum), &(cdata->isp_awb.G_Sum), &(cdata->isp_awb.B_Sum), &(cdata->isp_awb.pixel_count));
+		}
+		break;
+		}
+	case CFG_SET_LUMA_TARGET: {
+		CDBG("%s:%d %s cfgtype = %d, CFG_SET_LUMA_TARGET \n", __func__, __LINE__,
+		s_ctrl->sensordata->sensor_name, cdata->cfgtype);
+		AIT_ISP_set_luma_target(cdata->luma_target);
+		break;
+		}
 	case CFG_SET_BESTSHOT_MODE: {
 			break;
 		}
 		case CFG_SET_AUTOFOCUS: {
-		
+		/* TO-DO: set the Auto Focus */
 		pr_debug("%s: Setting Auto Focus", __func__);
 		break;
 		}
@@ -410,10 +463,17 @@ int32_t ov2722_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 		break;
 		}
 		case CFG_CANCEL_AUTOFOCUS: {
-		
+		/* TO-DO: Cancel the Auto Focus */
 		pr_debug("%s: Cancelling Auto Focus", __func__);
 		break;
 		}
+	case CFG_I2C_IOCTL_R_OTP:
+		if (s_ctrl->func_tbl->sensor_i2c_read_fuseid == NULL) {
+			rc = -EFAULT;
+			break;
+		}
+		rc = s_ctrl->func_tbl->sensor_i2c_read_fuseid(cdata, s_ctrl);
+	break;
 		default:
 		rc = -EFAULT;
 		break;
@@ -446,7 +506,7 @@ int32_t ov2722_sensor_power_down(struct msm_sensor_ctrl_t *s_ctrl)
     s_ctrl->power_setting_array.power_setting = ov2722_power_down_setting;
     s_ctrl->power_setting_array.size = ARRAY_SIZE(ov2722_power_down_setting);
 
-    
+    //When release regulator, need the same data pointer from power up sequence.
     for(i = 0; i < s_ctrl->power_setting_array.size;  i++)
     {
         data_size = sizeof(ov2722_power_setting[i].data)/sizeof(void *);
@@ -466,8 +526,8 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 	long rc = 0;
 	int32_t i = 0;
 	mutex_lock(s_ctrl->msm_sensor_mutex);
-	
-	
+	//CDBG("%s:%d %s cfgtype = %d\n", __func__, __LINE__,
+	//	s_ctrl->sensordata->sensor_name, cdata->cfgtype);
 	switch (cdata->cfgtype) {
 	case CFG_GET_SENSOR_INFO:
 		CDBG("%s:%d %s cfgtype = %d, CFG_GET_SENSOR_INFO+\n", __func__, __LINE__,
@@ -513,11 +573,23 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 		#endif
 		break;
 	case CFG_SET_RESOLUTION:
+	{
+		int res = 0;
 		CDBG("%s:%d %s cfgtype = %d, CFG_SET_RESOLUTION \n", __func__, __LINE__,
 		s_ctrl->sensordata->sensor_name, cdata->cfgtype);
-		#if 1
+		if (copy_from_user(&res,
+			(void *)compat_ptr(cdata->cfg.setting),
+			sizeof(int))) {
+			CDBG("%s:%d CFG_SET_RESOLUTION failed\n", __func__, __LINE__);
+		}
+		CDBG("%s: res:%d\n", __func__, res);
+		if(res == 0)
 		AIT_ISP_sensor_set_resolution(1920, 1080);
-		#endif
+		else if(res == 1)
+		AIT_ISP_sensor_set_resolution(960, 540);
+		else
+		AIT_ISP_sensor_set_resolution(1920, 1080);
+	}
 		break;
 	case CFG_SET_STOP_STREAM:
 		CDBG("%s:%d %s cfgtype = %d, CFG_SET_STOP_STREAM \n", __func__, __LINE__,
@@ -532,6 +604,21 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 		#if 1
 		AIT_ISP_sensor_start_stream();
 		#endif
+		
+		#if 0
+		AIT_ISP_enable_MEC_MWB(1, 1);
+		//void AIT_ISP_config_MEC(uint32_t N_parameter, uint16_t Overall_Gain);
+		// Exposure Time = Exposure Time / 1048576.
+		// real Gain = Overall_Gain / 256
+		AIT_ISP_config_MEC(0x8520, 0x151);
+		//void AIT_ISP_config_MWB(uint16_t R_Gain, uint16_t G_Gain, uint16_t B_Gain);
+		//fainl R Gain = R_Gain / 1024.
+		//fainl G Gain = G_Gain / 1024.
+		//fainl B Gain = B_Gain / 1024.
+		//The range of R_Gain, G_Gain and B_Gain is [1024, 4087]
+		AIT_ISP_config_MWB(2048, 2048, 2048);
+		#endif
+		
 		break;
 	case CFG_GET_SENSOR_INIT_PARAMS:
 		CDBG("%s:%d %s cfgtype = %d, CFG_GET_SENSOR_INIT_PARAMS \n", __func__, __LINE__,
@@ -579,8 +666,8 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 		}
 
 		conf_array.reg_setting = reg_setting;
-		
-		
+		//rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_write_table(
+		//	s_ctrl->sensor_i2c_client, &conf_array);
 		kfree(reg_setting);
 		CDBG("%s:%d %s cfgtype = %d, CFG_WRITE_I2C_ARRAY -\n", __func__, __LINE__,
 		s_ctrl->sensordata->sensor_name, cdata->cfgtype);
@@ -590,20 +677,34 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 	case CFG_POWER_UP:
 		CDBG("%s:%d %s cfgtype = %d, CFG_POWER_UP+\n", __func__, __LINE__,
 		s_ctrl->sensordata->sensor_name, cdata->cfgtype);
+		if (s_ctrl->sensor_state != MSM_SENSOR_POWER_DOWN) {
+			pr_err("%s:%d failed: invalid state %d\n", __func__,
+				__LINE__, s_ctrl->sensor_state);
+			rc = -EFAULT;
+			break;
+		}
+		
 		#ifdef CONFIG_CAMERA_AIT
-		rc = AIT_ISP_open_init(CAMERA_INDEX_SUB_OV2722); 
+		rc = AIT_ISP_open_init(CAMERA_INDEX_SUB_OV2722); //sub cam
 		#endif
 		if (s_ctrl->func_tbl->sensor_power_up)
 			rc = s_ctrl->func_tbl->sensor_power_up(s_ctrl);
 		else
 			rc = -EFAULT;
-		CDBG("%s:%d %s cfgtype = %d, CFG_POWER_UP-\n", __func__, __LINE__,
+		s_ctrl->sensor_state = MSM_SENSOR_POWER_UP;
+		CDBG("%s:%d %s cfgtype = %d, CFG_POWER_UP MSM_SENSOR_POWER_UP-\n", __func__, __LINE__,
 		s_ctrl->sensordata->sensor_name, cdata->cfgtype);
 		break;
 
 	case CFG_POWER_DOWN:
 		CDBG("%s:%d %s cfgtype = %d, CFG_POWER_DOWN+\n", __func__, __LINE__,
 		s_ctrl->sensordata->sensor_name, cdata->cfgtype);
+		if (s_ctrl->sensor_state != MSM_SENSOR_POWER_UP) {
+			pr_err("%s:%d failed: invalid state %d\n", __func__,
+				__LINE__, s_ctrl->sensor_state);
+			rc = -EFAULT;
+			break;
+		}
 		if (s_ctrl->func_tbl->sensor_power_down)
 			rc = s_ctrl->func_tbl->sensor_power_down(
 				s_ctrl);
@@ -612,7 +713,8 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 		#ifdef CONFIG_CAMERA_AIT
 			AIT_ISP_release();
 		#endif
-		CDBG("%s:%d %s cfgtype = %d, CFG_POWER_DOWN-\n", __func__, __LINE__,
+		s_ctrl->sensor_state = MSM_SENSOR_POWER_DOWN;
+		CDBG("%s:%d %s cfgtype = %d, CFG_POWER_DOWN MSM_SENSOR_POWER_DOWN-\n", __func__, __LINE__,
 		s_ctrl->sensordata->sensor_name, cdata->cfgtype);
 		break;
 
@@ -642,12 +744,47 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 
 		    break;
 	}
+	case CFG_SET_ISP_CALIBRATION: {
+		int32_t mode = 0;
+		mode = cdata->ISP_calibration_mode;
+		CDBG("%s:%d %s cfgtype = %d, CFG_SET_BESTSHOT_MODE:mode:%d \n", __func__, __LINE__,
+		s_ctrl->sensordata->sensor_name, cdata->cfgtype, mode);
+		if(mode == ISP_CALIBRATION_AUTO)
+		{
+		AIT_ISP_enable_calibration(0, NULL, NULL, 0);
+		}
+		else if(mode == ISP_CALIBRATION_MANUAL)
+		{
+			struct ISP_roi_local AE_roi;
+			struct ISP_roi_local AWB_roi;
+			uint16_t GainBase;
+			uint32_t ExposureTimeBase;
+			AE_roi.width = cdata->AE_roi.width;
+			AE_roi.height = cdata->AE_roi.height;
+			AE_roi.offsetx = cdata->AE_roi.offsetx;
+			AE_roi.offsety = cdata->AE_roi.offsety;
+			AWB_roi.width = cdata->AWB_roi.width;
+			AWB_roi.height = cdata->AWB_roi.height;
+			AWB_roi.offsetx = cdata->AWB_roi.offsetx;
+			AWB_roi.offsety = cdata->AWB_roi.offsety;			
+			AIT_ISP_enable_calibration(1, &AE_roi, &AWB_roi, cdata->luma_target);
+			AIT_ISP_Get_AE_calibration(&(cdata->isp_aec.Gain), &(GainBase), &(cdata->isp_aec.N_parameter), &(ExposureTimeBase), &(cdata->isp_aec.Luma_Value));
+			AIT_ISP_Get_AWB_calibration(&(cdata->isp_awb.R_Sum), &(cdata->isp_awb.G_Sum), &(cdata->isp_awb.B_Sum), &(cdata->isp_awb.pixel_count));
+		}
+		break;
+		}
+	case CFG_SET_LUMA_TARGET: {
+		CDBG("%s:%d %s cfgtype = %d, CFG_SET_LUMA_TARGET \n", __func__, __LINE__,
+		s_ctrl->sensordata->sensor_name, cdata->cfgtype);
+		AIT_ISP_set_luma_target(cdata->luma_target);
+		break;
+		}
 	case CFG_SET_BESTSHOT_MODE: {
 
 			break;
 		}
 		case CFG_SET_AUTOFOCUS: {
-		
+		/* TO-DO: set the Auto Focus */
 		pr_debug("%s: Setting Auto Focus", __func__);
 		break;
 		}
@@ -656,10 +793,18 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 		break;
 		}
 		case CFG_CANCEL_AUTOFOCUS: {
-		
+		/* TO-DO: Cancel the Auto Focus */
 		pr_debug("%s: Cancelling Auto Focus", __func__);
 		break;
 		}
+	case CFG_I2C_IOCTL_R_OTP:
+		if (s_ctrl->func_tbl->sensor_i2c_read_fuseid32 == NULL) {
+			rc = -EFAULT;
+			pr_err("%s:%d CFG_I2C_IOCTL_R_OTP fail-\n", __func__, __LINE__);
+			break;
+		}
+		rc = s_ctrl->func_tbl->sensor_i2c_read_fuseid32(cdata, s_ctrl);
+	break;
 		default:
 		rc = -EFAULT;
 		break;
@@ -671,13 +816,102 @@ int32_t ov2722_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 }
 #endif
 
-int32_t ov2722_yuv_sensor_match_id(struct msm_sensor_ctrl_t *s_ctrl)
+
+static int ov2722_yuv_read_fuseid(struct sensorb_cfg_data *cdata,
+	struct msm_sensor_ctrl_t *s_ctrl)
 {
 	int32_t rc = 0;
-	CDBG("%s \n",__func__);
+	static int first = 0;
+	static uint8_t id_data[4] = {0,0,0,0};
+	if(first == 0)
+	{
+	    AIT_ISP_read_subcam_OTP(id_data);
+	    first = 1;
+	}
+	if(cdata != NULL)
+	{
+	cdata->cfg.fuse.fuse_id_word1 = id_data[0];
+	cdata->cfg.fuse.fuse_id_word2 = id_data[1];
+	cdata->cfg.fuse.fuse_id_word3 = id_data[2];
+	cdata->cfg.fuse.fuse_id_word4 = id_data[3];
+	CDBG("[CAM]ov2722_yuv_read_fuseid: fuse->fuse_id : 0x%x 0x%x 0x%x 0x%x\n",
+		cdata->cfg.fuse.fuse_id_word1,
+		cdata->cfg.fuse.fuse_id_word2,
+		cdata->cfg.fuse.fuse_id_word3,
+		cdata->cfg.fuse.fuse_id_word4);
+	}
+	else
+	{
+	CDBG("[CAM]ov2722_yuv_read_fuseid: first fuse->fuse_id : 0x%x 0x%x 0x%x 0x%x\n",
+		id_data[0],
+		id_data[1],
+		id_data[2],
+		id_data[3]);
+	}
 
 	return rc;
 }
+
+static int ov2722_yuv_read_fuseid32(struct sensorb_cfg_data32 *cdata,
+	struct msm_sensor_ctrl_t *s_ctrl)
+{
+	int32_t rc = 0;
+	static int first = 0;
+	static uint8_t id_data[4] = {0,0,0,0};
+	if(first == 0)
+	{
+	    AIT_ISP_read_subcam_OTP(id_data);
+	    first = 1;
+	}
+	if(cdata != NULL)
+	{
+	cdata->cfg.fuse.fuse_id_word1 = id_data[0];
+	cdata->cfg.fuse.fuse_id_word2 = id_data[1];
+	cdata->cfg.fuse.fuse_id_word3 = id_data[2];
+	cdata->cfg.fuse.fuse_id_word4 = id_data[3];
+	CDBG("[CAM]ov2722_yuv_read_fuseid32: fuse->fuse_id : 0x%x 0x%x 0x%x 0x%x\n",
+		cdata->cfg.fuse.fuse_id_word1,
+		cdata->cfg.fuse.fuse_id_word2,
+		cdata->cfg.fuse.fuse_id_word3,
+		cdata->cfg.fuse.fuse_id_word4);
+	}
+	else
+	{
+	CDBG("[CAM]ov2722_yuv_read_fuseid32: first fuse->fuse_id : 0x%x 0x%x 0x%x 0x%x\n",
+		id_data[0],
+		id_data[1],
+		id_data[2],
+		id_data[3]);
+	}
+
+	return rc;
+}
+//HTC_START , move read OTP to sensor probe
+int32_t ov2722_yuv_sensor_match_id(struct msm_sensor_ctrl_t *s_ctrl)
+{
+	int32_t rc = 0;
+	int32_t rc1 = 0;
+	static int first = 0;
+	CDBG("%s \n",__func__);
+	if(first == 0)
+	{
+	    CDBG("%s AIT_ISP_read_subcam_sensor_ID \n",__func__);
+	    rc = AIT_ISP_read_subcam_sensor_ID();
+	    if(rc == 0)
+	    {
+	        CDBG("%s read_fuseid\n",__func__);
+	    #ifdef CONFIG_COMPAT
+	        rc1 = ov2722_yuv_read_fuseid32(NULL, s_ctrl);
+	    #else
+	        rc1 = ov2722_yuv_read_fuseid(NULL, s_ctrl);
+	    #endif
+	    }
+	    first = 1;
+	}
+
+	return rc;
+}
+//HTC_END
 static struct msm_sensor_fn_t sensor_func_tbl = {
 	.sensor_config = ov2722_sensor_config,
 #ifdef CONFIG_COMPAT
@@ -686,6 +920,8 @@ static struct msm_sensor_fn_t sensor_func_tbl = {
 	.sensor_power_up = ov2722_sensor_power_up,
 	.sensor_power_down = ov2722_sensor_power_down,
 	.sensor_match_id = ov2722_yuv_sensor_match_id,
+	.sensor_i2c_read_fuseid = ov2722_yuv_read_fuseid,
+	.sensor_i2c_read_fuseid32 = ov2722_yuv_read_fuseid32,
 };
 
 static struct msm_sensor_ctrl_t ov2722_s_ctrl = {

@@ -13,8 +13,6 @@
 struct dsi_power_data {
 	uint32_t sysrev;         
 	struct regulator *vddio; 	
-	struct regulator *vdda;  	
-	struct regulator *vddpll;    
 	int lcmp5v;
 	int lcmn5v;
 	int lcm_bl_en;
@@ -42,7 +40,7 @@ static const struct i2c_device_id lv52130_tx_id[] = {
 };
 
 static struct of_device_id LV_match_table[] = {
-	{.compatible = "disp-lv52130",}
+	{.compatible = "disp-tps-65132",}
 };
 
 static ssize_t lv52130_status_show(struct class *class,
@@ -175,7 +173,6 @@ static int lv52130_tx_i2c_probe(struct i2c_client *client,
 		pr_err("[DISP] %s: Failed to lv_52130_add_i2c, ret=%d\n", __func__,ret);
 		return ret;
 	}
-	lv52130_tx_status(&client->dev);
 	class_register(&lv52130_class);
 
 	return 0;
@@ -218,36 +215,7 @@ static int htc_m8ql_regulator_init(struct platform_device *pdev)
 
 	ctrl_pdata->dsi_pwrctrl_data = pwrdata;
 
-	pwrdata->vdda = devm_regulator_get(&pdev->dev, "vdda");
-	if (IS_ERR(pwrdata->vdda)) {
-		PR_DISP_ERR("%s: could not get vdda vreg, rc=%ld\n",
-			__func__, PTR_ERR(pwrdata->vdda));
-		return PTR_ERR(pwrdata->vdda);
-	}
-
-	
-	ret = regulator_set_voltage(pwrdata->vdda, 1200000, 1200000);
-	if (ret) {
-		PR_DISP_ERR("%s: set voltage failed on vdda vreg, rc=%d\n",
-			__func__, ret);
-		return ret;
-	}
-
-	pwrdata->vddpll = devm_regulator_get(&pdev->dev, "vddio");
-	if (IS_ERR(pwrdata->vddpll)) {
-		PR_DISP_ERR("%s: could not get vddpll vreg, rc=%ld\n",
-			__func__, PTR_ERR(pwrdata->vddpll));
-		return PTR_ERR(pwrdata->vddpll);
-	}
-
-	
-	ret = regulator_set_voltage(pwrdata->vddpll, 1800000, 1800000);
-	if (ret) {
-		PR_DISP_ERR("%s: set voltage failed on vddpll vreg, rc=%d\n",
-			__func__, ret);
-		return ret;
-	}
-	pwrdata->vddio = devm_regulator_get(&pdev->dev, "vddb");
+	pwrdata->vddio = devm_regulator_get(&pdev->dev, "vddlcmio");
 	if (IS_ERR(pwrdata->vddio)) {
 		PR_DISP_ERR("%s: could not get vddio vreg, rc=%ld\n",
 			__func__, PTR_ERR(pwrdata->vddio));
@@ -299,6 +267,8 @@ void htc_m8ql_panel_reset(struct mdss_panel_data *pdata, int enable)
 	PR_DISP_INFO("%s: enable = %d\n", __func__, enable);
 
 	if (enable) {
+		u8 avdd_level = 0;
+		u8 avdd_mode = 0;
 		if (pdata->panel_info.first_power_on == 1) {
 			PR_DISP_INFO("reset already on in first time\n");
 			return;
@@ -306,11 +276,16 @@ void htc_m8ql_panel_reset(struct mdss_panel_data *pdata, int enable)
 		usleep_range(10000, 10500);
 		
 		gpio_set_value(pwrdata->lcmp5v, 1);
-		usleep_range(50000, 50500);
+		usleep_range(10000, 10500);
 		
 		gpio_set_value(pwrdata->lcmn5v, 1);
 		usleep_range(10000, 10500);
 		
+		avdd_level = 0x0F;
+		avdd_mode = 0x43;
+		platform_write_i2c_block(i2c_bus_adapter,0x7C,0x00, 0x01, &avdd_level);
+		platform_write_i2c_block(i2c_bus_adapter,0x7C,0x01, 0x01, &avdd_level);
+		platform_write_i2c_block(i2c_bus_adapter,0x7C,0x03, 0x01, &avdd_mode);
 		gpio_set_value(ctrl_pdata->rst_gpio, 1);
 		usleep_range(10000, 10500);
 	} else {
@@ -326,34 +301,6 @@ void htc_m8ql_panel_reset(struct mdss_panel_data *pdata, int enable)
 	}
 
 	PR_DISP_INFO("%s: enable = %d done\n", __func__, enable);
-}
-
-static void htc_m8ql_bkl_en(struct mdss_panel_data *pdata, int enable)
-{
-	static int en = 1;
-	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
-	struct dsi_power_data *pwrdata = NULL;
-
-	if(en == enable)
-		return;
-
-	en = enable;
-	PR_DISP_INFO("%s: en=%d\n", __func__, enable);
-
-	if (pdata == NULL) {
-		pr_err("%s: Invalid input data\n", __func__);
-		return;
-	}
-
-	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
-								panel_data);
-	pwrdata = ctrl_pdata->dsi_pwrctrl_data;
-
-	if (enable) {
-		gpio_set_value(pwrdata->lcm_bl_en, 1);
-	} else {
-		gpio_set_value(pwrdata->lcm_bl_en, 0);
-	}
 }
 
 static int htc_m8ql_panel_power_on(struct mdss_panel_data *pdata, int enable)
@@ -378,19 +325,6 @@ static int htc_m8ql_panel_power_on(struct mdss_panel_data *pdata, int enable)
 	}
 
 	if (enable) {
-		ret = regulator_set_optimum_mode(pwrdata->vdda, 100000);
-		if (ret < 0) {
-			PR_DISP_ERR("%s: vdda set opt mode failed.\n",
-				__func__);
-			return ret;
-		}
-
-		ret = regulator_set_optimum_mode(pwrdata->vddpll, 100000);
-		if (ret < 0) {
-			PR_DISP_ERR("%s: vddpll set opt mode failed.\n",
-				__func__);
-			return ret;
-		}
 
 		ret = regulator_set_optimum_mode(pwrdata->vddio, 100000);
 		if (ret < 0) {
@@ -404,44 +338,18 @@ static int htc_m8ql_panel_power_on(struct mdss_panel_data *pdata, int enable)
 		}
 
 		
-		ret = regulator_enable(pwrdata->vddpll);
-		if (ret) {
-			PR_DISP_ERR("%s: Failed to enable regulator2.\n",__func__);
-			return ret;
-		}
-		usleep_range(10000, 10500);
-
-		
-		ret = regulator_enable(pwrdata->vdda);
-		if (ret) {
-			PR_DISP_ERR("%s: Failed to enable regulator1.\n",__func__);
-			return ret;
-		}
-		
 		ret = regulator_enable(pwrdata->vddio);
 		if (ret) {
 			PR_DISP_ERR("%s: Failed to enable regulator3.\n",__func__);
 			return ret;
 		}
+		gpio_set_value(pwrdata->lcm_bl_en, 1);
 	} else {
+		gpio_set_value(pwrdata->lcm_bl_en, 0);
 		
 		ret = regulator_disable(pwrdata->vddio);
 		if (ret) {
 			PR_DISP_ERR("%s: Failed to disable regulator3.\n",
-				__func__);
-			return ret;
-		}
-		
-		ret = regulator_disable(pwrdata->vdda);
-		if (ret) {
-			PR_DISP_ERR("%s: Failed to disable vdda regulator.\n",
-				__func__);
-			return ret;
-		}
-		
-		ret = regulator_disable(pwrdata->vddpll);
-		if (ret) {
-			PR_DISP_ERR("%s: Failed to disable regulator2.\n",
 				__func__);
 			return ret;
 		}
@@ -452,19 +360,6 @@ static int htc_m8ql_panel_power_on(struct mdss_panel_data *pdata, int enable)
 			return ret;
 		}
 
-		ret = regulator_set_optimum_mode(pwrdata->vddpll, 100);
-		if (ret < 0) {
-			PR_DISP_ERR("%s: vddpll_vreg set opt mode failed.\n",
-				__func__);
-			return ret;
-		}
-
-		ret = regulator_set_optimum_mode(pwrdata->vdda, 100);
-		if (ret < 0) {
-			PR_DISP_ERR("%s: vdda_vreg set opt mode failed.\n",
-				__func__);
-			return ret;
-		}
 	}
 	PR_DISP_INFO("%s: en=%d done\n", __func__, enable);
 
@@ -476,7 +371,6 @@ static struct mdss_dsi_pwrctrl dsi_pwrctrl = {
 	.dsi_regulator_deinit = htc_m8ql_regulator_deinit,
 	.dsi_power_on = htc_m8ql_panel_power_on,
 	.dsi_panel_reset = htc_m8ql_panel_reset,
-	.bkl_config = htc_m8ql_bkl_en,
 
 };
 

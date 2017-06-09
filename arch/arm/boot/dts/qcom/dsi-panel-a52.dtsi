@@ -100,9 +100,9 @@
 		qcom,mdss-pan-physical-height-dimension = <121>;
 		qcom,mdss-shrink-pwm = <6 76 255>;
 		qcom,mdss-dsi-lp11-init;
-		qcom,mdss-dsi-force-clk-lane-hs;
 		htc,mdss-camera-blk = <191>;
 		htc,panel-id=<1>;
+		qcom,dlnx_fifo_overflow;
 	};
 	qcom,mdss_dsi_a52_truly_renesas_63315_1080p_video {
 		compatible = "qcom,mdss-dsi-panel";
@@ -190,8 +190,8 @@
 		qcom,mdss-pan-physical-height-dimension = <121>;
 		qcom,mdss-shrink-pwm = <6 76 255>;
 		qcom,mdss-dsi-lp11-init;
-		qcom,mdss-dsi-force-clk-lane-hs;
 		htc,mdss-camera-blk = <191>;
 		htc,panel-id=<2>;
+		qcom,dlnx_fifo_overflow;
 	};
 };

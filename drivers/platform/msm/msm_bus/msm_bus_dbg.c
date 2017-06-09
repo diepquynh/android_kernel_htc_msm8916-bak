@@ -45,6 +45,7 @@ struct msm_bus_dbg_state {
 
 struct msm_bus_cldata {
 	const struct msm_bus_scale_pdata *pdata;
+	const struct msm_bus_client_handle *handle;
 	int index;
 	uint32_t clid;
 	int size;
@@ -66,6 +67,10 @@ static char *rules_buf;
 LIST_HEAD(fabdata_list);
 LIST_HEAD(cl_list);
 
+/**
+ * The following structures and funtions are used for
+ * the test-client which can be created at run-time.
+ */
 
 static struct msm_bus_vectors init_vectors[1];
 static struct msm_bus_vectors current_vectors[1];
@@ -270,6 +275,10 @@ static int msm_bus_dbg_en_set(void  *data, u64 val)
 DEFINE_SIMPLE_ATTRIBUTE(shell_client_en_fops, msm_bus_dbg_en_get,
 	msm_bus_dbg_en_set, "%llu\n");
 
+/**
+ * The following funtions are used for viewing the client data
+ * and changing the client request at run-time
+ */
 
 static ssize_t client_data_read(struct file *file, char __user *buf,
 	size_t count, loff_t *ppos)
@@ -277,14 +286,17 @@ static ssize_t client_data_read(struct file *file, char __user *buf,
 	int bsize = 0;
 	uint32_t cl = (uint32_t)(uintptr_t)file->private_data;
 	struct msm_bus_cldata *cldata = NULL;
+	const struct msm_bus_client_handle *handle = file->private_data;
 	int found = 0;
 
 	list_for_each_entry(cldata, &cl_list, list) {
-		if (cldata->clid == cl) {
+		if ((cldata->clid == cl) ||
+			(cldata->handle && (cldata->handle == handle))) {
 			found = 1;
 			break;
 		}
 	}
+
 	if (!found)
 		return 0;
 
@@ -313,6 +325,94 @@ struct dentry *msm_bus_dbg_create(const char *name, mode_t mode,
 	}
 	return debugfs_create_file(name, mode, dent, (void *)(uintptr_t)clid,
 		&client_data_fops);
+}
+
+int msm_bus_dbg_add_client(const struct msm_bus_client_handle *pdata)
+
+{
+	struct msm_bus_cldata *cldata;
+
+	cldata = kzalloc(sizeof(struct msm_bus_cldata), GFP_KERNEL);
+	if (!cldata) {
+		MSM_BUS_DBG("Failed to allocate memory for client data\n");
+		return -ENOMEM;
+	}
+	cldata->handle = pdata;
+	list_add_tail(&cldata->list, &cl_list);
+	return 0;
+}
+
+int msm_bus_dbg_rec_transaction(const struct msm_bus_client_handle *pdata,
+						u64 ab, u64 ib)
+{
+	struct msm_bus_cldata *cldata;
+	int i;
+	struct timespec ts;
+	bool found = false;
+	char *buf = NULL;
+
+	list_for_each_entry(cldata, &cl_list, list) {
+		if (cldata->handle == pdata) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found)
+		return -ENOENT;
+
+	if (cldata->file == NULL) {
+		if (pdata->name == NULL) {
+			MSM_BUS_DBG("Client doesn't have a name\n");
+			return -EINVAL;
+		}
+		pr_err("\n%s setting up debugfs %s", __func__, pdata->name);
+		cldata->file = debugfs_create_file(pdata->name, S_IRUGO,
+				clients, (void *)pdata, &client_data_fops);
+	}
+
+	if (cldata->size < (MAX_BUFF_SIZE - FILL_LIMIT))
+		i = cldata->size;
+	else {
+		i = 0;
+		cldata->size = 0;
+	}
+	buf = cldata->buffer;
+	ts = ktime_to_timespec(ktime_get());
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "\n%d.%d\n",
+		(int)ts.tv_sec, (int)ts.tv_nsec);
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "master: ");
+
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "%d  ", pdata->mas);
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "\nslave : ");
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "%d  ", pdata->slv);
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "\nab     : ");
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "%llu  ", ab);
+
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "\nib     : ");
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "%llu  ", ib);
+	i += scnprintf(buf + i, MAX_BUFF_SIZE - i, "\n");
+	cldata->size = i;
+
+	trace_bus_update_request((int)ts.tv_sec, (int)ts.tv_nsec,
+		pdata->name, pdata->mas, pdata->slv, ab, ib,
+		pdata->active_only);
+
+	return i;
+}
+
+void msm_bus_dbg_remove_client(const struct msm_bus_client_handle *pdata)
+{
+	struct msm_bus_cldata *cldata = NULL;
+
+	list_for_each_entry(cldata, &cl_list, list) {
+		if (cldata->handle == pdata) {
+			debugfs_remove(cldata->file);
+			list_del(&cldata->list);
+			kfree(cldata);
+			break;
+		}
+	}
 }
 
 static int msm_bus_dbg_record_client(const struct msm_bus_scale_pdata *pdata,
@@ -408,12 +508,14 @@ static int msm_bus_dbg_fill_cl_buffer(const struct msm_bus_scale_pdata *pdata,
 
 	for (j = 0; j < pdata->usecase->num_paths; j++)
 		trace_bus_update_request((int)ts.tv_sec, (int)ts.tv_nsec,
-		pdata->name, index,
+		pdata->name,
 		pdata->usecase[index].vectors[j].src,
 		pdata->usecase[index].vectors[j].dst,
 		pdata->usecase[index].vectors[j].ab,
-		pdata->usecase[index].vectors[j].ib);
+		pdata->usecase[index].vectors[j].ib,
+		pdata->active_only);
 
+	cldata->index = index;
 	cldata->size = i;
 	return i;
 }
@@ -442,18 +544,12 @@ static ssize_t  msm_bus_dbg_update_request_write(struct file *file,
 
 	if (!buf || IS_ERR(buf)) {
 		MSM_BUS_ERR("Memory allocation for buffer failed\n");
-		if (buf)
-			kfree(buf);
 		return -ENOMEM;
 	}
-	if (cnt == 0) {
-		kfree(buf);
+	if (cnt == 0)
 		return 0;
-	}
-	if (copy_from_user(buf, ubuf, cnt)) {
-		kfree(buf);
+	if (copy_from_user(buf, ubuf, cnt))
 		return -EFAULT;
-	}
 	buf[cnt] = '\0';
 	chid = buf;
 	MSM_BUS_DBG("buffer: %s\n size: %zu\n", buf, sizeof(ubuf));
@@ -468,7 +564,6 @@ static ssize_t  msm_bus_dbg_update_request_write(struct file *file,
 				if (ret) {
 					MSM_BUS_DBG("Index conversion"
 						" failed\n");
-					kfree(buf);
 					return -EFAULT;
 				}
 			} else {
@@ -486,6 +581,10 @@ static ssize_t  msm_bus_dbg_update_request_write(struct file *file,
 	return cnt;
 }
 
+/**
+ * The following funtions are used for viewing the commit data
+ * for each fabric
+ */
 static ssize_t fabric_data_read(struct file *file, char __user *buf,
 	size_t count, loff_t *ppos)
 {
@@ -627,6 +726,12 @@ static const struct file_operations msm_bus_dbg_update_request_fops = {
 	.write = msm_bus_dbg_update_request_write,
 };
 
+/**
+ * msm_bus_dbg_client_data() - Add debug data for clients
+ * @pdata: Platform data of the client
+ * @index: The current index or operation to be performed
+ * @clid: Client handle obtained during registration
+ */
 void msm_bus_dbg_client_data(struct msm_bus_scale_pdata *pdata, int index,
 	uint32_t clid)
 {
@@ -646,6 +751,15 @@ void msm_bus_dbg_client_data(struct msm_bus_scale_pdata *pdata, int index,
 }
 EXPORT_SYMBOL(msm_bus_dbg_client_data);
 
+/**
+ * msm_bus_dbg_commit_data() - Add commit data from fabrics
+ * @fabname: Fabric name specified in platform data
+ * @cdata: Commit Data
+ * @nmasters: Number of masters attached to fabric
+ * @nslaves: Number of slaves attached to fabric
+ * @ntslaves: Number of tiered slaves attached to fabric
+ * @op: Operation to be performed
+ */
 void msm_bus_dbg_commit_data(const char *fabname, void *cdata,
 	int nmasters, int nslaves, int ntslaves, int op)
 {
